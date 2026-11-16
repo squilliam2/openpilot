@@ -1,6 +1,6 @@
 # Personal Dom fork: FLM and drive history
 
-Updated through [upstream `Dom` b5137efa477e](https://github.com/StarPilotHQ/StarPilot/commit/b5137efa477e8c540941f9e4f9ac25063036c9fd).
+Updated through [upstream `Dom` e658344ea46d](https://github.com/StarPilotHQ/StarPilot/commit/e658344ea46d423229556ee7109d397b76b9d0d4).
 The original investigation used upstream `cfafb8ca72c6`.
 Install branch: [`squilliam2/openpilot:dom`](https://github.com/squilliam2/openpilot/tree/dom).
 Custom software URL: **https://raw.githubusercontent.com/squilliam2/openpilot/dom/installer-dom**.
@@ -328,6 +328,9 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
   regional settings migration, Home branch labels, browser setup and retained-OS
   update contracts. Current Volvo and speed-limit suites pass **1,282 tests and
   585 subtests**, including unsupported-PSCM withdrawal and SLC input validation.
+  The new upstream numeric guards use equivalent explicit type-identity checks
+  so the repository's pinned type checker can narrow their values; runtime
+  admission rules are unchanged. Speed-limit lint and type checks pass too.
 - Full-route stream tests cover 51, 355, 513 and 1,001 available sections without
   a route-count cutoff, persisted progress, transient transfer retries, original
   byte deduplication, damaged-tail omissions and bounded report previews. Actual
