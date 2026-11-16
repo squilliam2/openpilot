@@ -43,7 +43,7 @@ def _decode(raw):
     document = json.loads(raw, object_pairs_hook=_unique)
   except RecursionError as error:
     raise ValueError('Preference nesting exceeds parser limits') from error
-  if (not isinstance(document, dict) or set(document) != {'version', 'vehicles'} or
+  if (not isinstance(document, dict) or not {'version', 'vehicles'} <= set(document) or set(document) - {'version', 'vehicles', 'modes'} or
       type(document['version']) is not int or document['version'] != 1 or
       not isinstance(document['vehicles'], dict)):
     raise ValueError('Invalid preference document')
@@ -57,6 +57,19 @@ def _decode(raw):
       count += 1
   if count > 64:
     raise ValueError('Too many vehicle preferences')
+  modes = document.get('modes', {})
+  if type(modes) is not dict:
+    raise ValueError('Invalid learning modes')
+  mode_count = 0
+  for brand, vehicles in modes.items():
+    if not brand or len(brand) > 64 or type(vehicles) is not dict:
+      raise ValueError('Invalid learning mode brand')
+    for fingerprint, mode in vehicles.items():
+      if not fingerprint or len(fingerprint) > 256 or mode not in ('parked', 'live'):
+        raise ValueError('Invalid vehicle learning mode')
+      mode_count += 1
+  if mode_count > 64:
+    raise ValueError('Too many vehicle learning modes')
   return document
 
 
@@ -83,6 +96,38 @@ def replace_preference(raw: bytes | None, CP, enabled: bool) -> bytes:
   brand, fingerprint = _identity(CP)
   document = _decode(raw)
   document['vehicles'].setdefault(brand, {})[fingerprint] = enabled
+  encoded = json.dumps(document, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+  _decode(encoded)
+  return encoded
+
+
+def learning_mode(raw, CP):
+  brand, fingerprint = _identity(CP)
+  return _decode(raw).get('modes', {}).get(brand, {}).get(fingerprint, 'parked')
+
+
+def read_learning_mode(params, CP):
+  raw, okay = read_saved(params, KEY, MAX_BYTES)
+  if not okay:
+    raise ValueError('Unreadable learning mode')
+  return learning_mode(raw, CP)
+
+
+def replace_learning_mode(raw, CP, mode):
+  if mode not in ('parked', 'live'):
+    raise ValueError('Choose parked or live learning')
+  brand, fingerprint = _identity(CP)
+  document = _decode(raw)
+  if mode == 'live':
+    document.setdefault('modes', {}).setdefault(brand, {})[fingerprint] = mode
+  else:
+    modes = document.get('modes', {})
+    vehicles = modes.get(brand, {})
+    vehicles.pop(fingerprint, None)
+    if not vehicles:
+      modes.pop(brand, None)
+    if not modes:
+      document.pop('modes', None)
   encoded = json.dumps(document, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
   _decode(encoded)
   return encoded

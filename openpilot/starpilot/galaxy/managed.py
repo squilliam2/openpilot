@@ -112,6 +112,7 @@ def main() -> None:
   server = make_server(port=8082, host='0.0.0.0')
   try:
     server.start_drive_history()
+    server.start_route_reviews()
     pairing = default_remote_pairing()
     remote_server = make_remote_server(server)
     try:

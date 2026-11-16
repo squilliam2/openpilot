@@ -15,6 +15,11 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
    and remains bound to the complete typed CP, saved settings, controller and
    baseline. No VIN is invented or written to the car.
 
+   **Original VIN discovery is unchanged and still runs first.** The upstream
+   VIN queries in `opendbc/car/vin.py` and vehicle discovery in `car_helpers.py`
+   were never replaced. A discovered VIN always takes precedence over the new
+   fallback. A regression test verifies that neither path rewrites CarParams.
+
    **Reset Auto Learn whenever moving this device to another vehicle, including
    an identical car.** The fallback is a device-local firmware binding; it cannot
    uniquely distinguish two physically different cars with identical CP/firmware.
@@ -48,21 +53,81 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
    result never becomes a completed FLM/trial receipt or accepted tune. Decoder
    cancellation cannot publish partial success.
 
+5. **Existing recordings now have an independent historical review path.**
+   Galaxy automatically queues existing local dense rlogs while parked, including
+   recordings older than the optimizer's eight-route input selection. Under
+   **Steering → Activity → Existing routes**, request a local rerun or paste a
+   specific Connect route ID/URL for this comma. Connect uses the device's existing
+   comma authentication for its inventory; it does not send that authentication to
+   log storage. Cloud downloads happen only on explicit request while parked.
+
+   Each review selects at most 14 evenly spread original segments, including the
+   first and last. Cloud input is capped at 448 MiB, requires 512 MiB free space,
+   and is removed afterward. Reports record segment coverage and omissions,
+   low/high-speed tracking error and error reversals, controller metadata and route
+   scope availability. They can be downloaded as JSON. The review library retains
+   up to 100 records; bounded inventory/coverage is disclosed in the UI.
+
+   These are **observational reports, not historical tune application**. Legacy
+   recordings without configuration/pose/native evidence cannot become qualified
+   tuning receipts. Unclosed or damaged compressed segments are omitted, not
+   repaired. Missing original rlogs cannot be reconstructed from sparse qlogs.
+   Reviews use a separate bounded, low-priority child, leave logger identity and
+   tuning Params untouched, and pause/reap when the vehicle starts. Reports persist
+   across restart; source changes trigger another review. Removed automatic queue
+   entries cannot fill the library and block newer recordings.
+
+6. **Optional live FLM is wired into the managed process.** Upstream's process
+   launcher ran the parked daemon; onroad it recorded for later analysis. Its
+   parked route scope also selected the parked overlay in Controls, bypassing the
+   existing live tracking service. Choosing **Live FLM · experimental** now starts
+   the existing `steerlearnerd` live learner on the next drive and leaves the parked
+   overlay inactive. Returning offroad stops/reaps live children and replaces the
+   process image before any parked work. Only the selected learner runs.
+
+   This uses the existing physical-response qualification, native/source leases,
+   controller eligibility, bounded proposals, gradual application and rollback.
+   It does not change the optimizer math, steering safety limits or driver override.
+   Confirmed persistence uses the same VIN-first/device-firmware identity binding.
+   Insufficient evidence, disabled learning, manual ownership or a failed trial
+   still prevents an update. Live learning is not a promise that every FLM value
+   changes on every drive, and it does not alter the separate LAGD estimator.
+
+   **Parked mode remains the default.** The per-vehicle mode is an optional field
+   in the existing preferences document, so no new native Params key or ARM binary
+   is needed. Switching mode preserves the existing On/Off choice. Before rolling
+   back to older software, choose Parked for every platform with Live selected:
+   clearing the last Live choice removes the optional field. An older strict
+   reader otherwise rejects it and disables learning until preferences are reset.
+
 ## Verification
 
-- Final affected Python suite: **363 passed**, with **224 passing subtests**.
-  The existing manager/fork test emits one multiprocessing deprecation warning.
-- **100 non-browser Galaxy JavaScript test files passed.** The patched dashboard
+- Final affected Python regression suite: **867 passed**, with **258 passing subtests**.
+  Existing tests emit one
+  multiprocessing warning and three Cap'n Proto repeated-write warnings.
+- **102 non-browser Galaxy JavaScript test files passed.** The patched dashboard
   also passed real headless Chrome checks at 416 and 1280 pixel widths: observed
   distance and partial-coverage labels render without overflow or browser errors.
   The separate upstream FLM browser harness assumes POSIX paths and did not run
   successfully on this Windows host; the dashboard browser checks use a local
-  fixture and the actual patched Home component instead.
+  fixture and the actual patched Home component instead. Separate Chrome checks
+  also exercise the actual new route-review and learning-mode components at both
+  widths, including queuing a Connect review and saving Live mode through local
+  API fixtures. No browser errors or horizontal overflow were observed.
 - Regression coverage includes registered Sonata parked/live scope agreement,
   different devices/firmware/reset generations, missing identity refusal,
   355-segment admission and 513-segment refusal, damaged/interior/cancelled logs,
   durable partial statistics, replacement after repair, exclusions, HTTP access,
   controller replay, persistence and shutdown.
+- Live-mode integration with a discovered VIN reaches the actual Controls
+  application path, applies only the existing bounded correction, then withdraws
+  it on driver override. Mode selection is parked-only, checks the vehicle/settings
+  revision, and preserves explicit OFF and the original saved CarParams.
+- Eight intact dense rlogs sampled from the supplied drive produce **84
+  uninterrupted tracking windows** across both speed cohorts in the real bounded
+  review subprocess, despite unknown VIN and missing route scope. The unfinished
+  final segment is omitted. This is sampled diagnostic coverage, not a full-route
+  tune or proof of its cause.
 - The patched analyzer processed all 355 qlogs from the supplied drive: **536,749
   meters (333.5 miles), 21,235.775 seconds, 15.3% normal engagement and 75.6% AOL
   steering-only time**, excluding the damaged final segment. Upstream returned
@@ -76,15 +141,25 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
 
 No private route files, location data, device IDs or Galaxy export are included
 in this repository. This is a Python/web patch using the upstream ARM binaries;
-it is not a new full native build or a road-tested steering calibration.
+it is not a new full native build or a road-tested steering calibration. Device
+authentication/download failure paths are tested with API fixtures; authenticated
+Connect import and live performance still need validation on the actual comma.
 
 ## First validation after installation
 
-Keep Auto Learn enabled for the selected vehicle, with no manually owned FLM
-surface and Safe Mode off. Record a new drive on this build. Leave the comma
-powered after ignition off so the logger can close the recording and the parked
-worker can analyze it. Galaxy should show current analysis, counts and either a
-specific refusal or a provisional next-drive result. A new tune still requires
-sufficient eligible evidence and native qualification; enabling learning alone
-does not guarantee a nonzero adjustment. Older incomplete recordings can supply
-diagnostics and observed dashboard statistics, not fabricated tuning proof.
+1. Keep Auto Learn enabled for the selected vehicle, with no manually owned FLM
+   surface and Safe Mode off. Choosing a learning mode does not turn Auto Learn on.
+2. For updates during a drive, open **Galaxy → Steering → Overview → When Auto
+   Learn runs** while parked. Select **Live FLM · experimental**, then **Save for
+   next drive**. The next drive uses qualified live updates; sufficient evidence
+   and native qualification are still required. Validate this experimental mode
+   on the actual vehicle before relying on its behavior.
+3. For the original workflow, keep **Parked analysis · next-drive tune**. Record
+   a new drive and leave the comma powered after ignition off so the logger can
+   close it and the worker can analyze it. Galaxy should show counts and either
+   a specific refusal or a provisional next-drive result.
+4. Existing local recordings are reviewed automatically while parked. For a
+   particular cloud route, use **Steering → Activity → Existing routes** and
+   explicitly request it. Dashboard statistics remain a separate analysis path;
+   observed partial-drive statistics and historical reports are never substituted
+   for completed tuning proof.

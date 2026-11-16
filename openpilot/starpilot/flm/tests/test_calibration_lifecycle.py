@@ -208,10 +208,12 @@ def test_actual_core_first_invalid_receipt_then_same_generation_cannot_resume():
 def test_actual_main_source_reader_reuses_lifecycle_for_cache_and_persistence():
   from unittest import mock
   from openpilot.starpilot.flm import steerlearnerd
+  from openpilot.starpilot.lateral.learning_preferences import KEY, replace_learning_mode
 
   with fixed_controls() as (controls, _):
     cp = controls.CP.as_builder()
     cp.carVin = 'KMHM54AA6PA000001'
+    controls.params.put(KEY, replace_learning_mode(controls.params.get(KEY), cp, 'live'), block=True)
     controls.params.put('CarParams', cp.to_bytes(), block=True)
     cal = calibration()
     sm = type('Sources', (), {

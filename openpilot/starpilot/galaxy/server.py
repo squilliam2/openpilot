@@ -96,7 +96,8 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
                 plots=None, map_operations=None, recordings=None, recording_media=None, segment_summary=None,
                 sentry_events=None, notifications=None, training_results=None, bluetooth=None, vehicle_selection=None,
                 model_manager=None, layouts=None, favorites=None,
-                sounds=None, software_operations=None, drive_stats=None, layout_preview_socket=None, controllers_socket=None,
+                sounds=None, software_operations=None, drive_stats=None, route_reviews=None, learning_mode=None,
+                layout_preview_socket=None, controllers_socket=None,
                 remote_pairing=None, parked=None, camera_snapshot=None, clock=time.monotonic, starport_setup=None,
                 starport_client=None, navigation=None, offline_maps=None, drive_state=None, cloud_provider=None, cloud_offroad=None, projection_layout=None,
                 local_access=None, tmux_live=None, starport_logs=None, starport_log_sender=None, hotspot=None, toyota_tools=None,
@@ -168,6 +169,10 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
   history = recordings if recordings is not None else DriveHistory()
   drive_stats_source = drive_stats
   drive_stats_lock = threading.Lock()
+  route_reviews_source = route_reviews
+  route_reviews_lock = threading.Lock()
+  learning_mode_source = learning_mode
+  learning_mode_lock = threading.Lock()
   recording_library = RecordingLibrary(history)
   recordings_lock = threading.Lock()
   recording_media_source = recording_media
@@ -308,6 +313,29 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
                                              metric=lambda: params.get_bool('IsMetric'))
       server.drive_stats_source = drive_stats_source
       return drive_stats_source
+
+  def historical_reviews():
+    nonlocal route_reviews_source
+    with route_reviews_lock:
+      if route_reviews_source is None:
+        from openpilot.common.params import Params
+        from openpilot.starpilot.galaxy.route_reviews import RouteReviews
+        from openpilot.starpilot.storage import galaxy_storage_root
+        params = Params()
+        route_reviews_source = RouteReviews(history.root, galaxy_storage_root() / 'route-reviews',
+                                           permitted=lambda: statistics_owner()._allowed(),
+                                           device_id=lambda: params.get('DongleId') or '')
+      server.route_reviews_source = route_reviews_source
+      return route_reviews_source
+
+  def flm_learning_mode():
+    nonlocal learning_mode_source
+    with learning_mode_lock:
+      if learning_mode_source is None:
+        from openpilot.common.params import Params
+        from openpilot.starpilot.galaxy.flm_learning_mode import LearningMode
+        learning_mode_source = LearningMode(Params(), parked=parked)
+      return learning_mode_source
 
   def software_owner():
     nonlocal software_operations_source
@@ -1387,6 +1415,27 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         filename, body = training_results_source.download()
         if self.require_session():
           self.attachment(filename, body, 'application/json; charset=utf-8')
+      elif path == '/api/flm/mode':
+        if self.require_session():
+          if urlsplit(self.path).query:
+            self.json(400, {'error': 'Unexpected learning-mode query'})
+            return
+          result = flm_learning_mode().snapshot()
+          if self.require_session():
+            self.json(200, result)
+      elif path == '/api/flm/route-reviews':
+        if not self.require_session():
+          return
+        if urlsplit(self.path).query:
+          self.json(400, {'error': 'Unexpected route-review query'})
+          return
+        try:
+          result = historical_reviews().snapshot()
+        except (OSError, RuntimeError, ValueError):
+          self.json(503, {'error': 'Historical route reviews are unavailable'})
+        else:
+          if self.require_session():
+            self.json(200, result)
       elif path == '/api/flm/training-results':
         if not self.require_session():
           return
@@ -1688,7 +1737,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         finally:
           self.connection.settimeout(old_timeout)
         return
-      if path.startswith('/api/flm/'):
+      if path.startswith('/api/flm/') and path not in ('/api/flm/route-reviews', '/api/flm/mode'):
         self.close_connection = True
         if self.require_session():
           self.json(404, {'error': 'Not found'})
@@ -1699,7 +1748,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
                       '/api/settings/flm-backup/preview', '/api/settings/flm-backup/confirm',
                       '/api/settings/reset-default', '/api/settings/restore', '/api/recordings/action',
                       '/api/replay/start', '/api/replay/control', '/api/replay/stop',
-                      '/api/replay/export-start',
+                      '/api/replay/export-start', '/api/flm/route-reviews', '/api/flm/mode',
                       '/api/galaxy/pair', '/api/galaxy/unpair', '/api/galaxy/device-name', '/api/galaxy/hotspot',
                       '/api/cameras/snapshot', '/api/cameras/white-balance',
                       '/api/starport/layout', '/api/starport/enable', '/api/starport/control', '/api/starport/pairing',
@@ -2180,7 +2229,50 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
               return
             self.json(200, {'paired': False})
         return
-      if path == '/api/drives/ignore':
+      if path == '/api/flm/mode':
+        identity = self.settings_session()
+        if identity is None:
+          self.json(401, {'error': 'Sign in to Galaxy'})
+          return
+        try:
+          if urlsplit(self.path).query or type(payload) is not dict or set(payload) != {'mode', 'revision'}:
+            raise ValueError('Choose a learning mode')
+          with effect_lock:
+            result = flm_learning_mode().select(payload['mode'], payload['revision'], authorized=lambda: self.settings_session() == identity)
+        except PermissionError:
+          self.json(401, {'error': 'Sign in to Galaxy'})
+        except ValueError as error:
+          self.json(409, {'error': str(error)[:200]})
+        except (OSError, RuntimeError):
+          self.json(503, {'error': 'Learning mode could not be saved'})
+        else:
+          if self.settings_session() == identity:
+            self.json(200, result)
+          else:
+            self.json(401, {'error': 'Sign in to Galaxy'})
+      elif path == '/api/flm/route-reviews':
+        identity = self.settings_session()
+        if identity is None:
+          self.json(401, {'error': 'Sign in to Galaxy'})
+          return
+        try:
+          if urlsplit(self.path).query or type(payload) is not dict or set(payload) != {'source', 'routeId'}:
+            raise ValueError('Choose an existing local or Connect route')
+          with effect_lock:
+            result = historical_reviews().request(payload['source'], payload['routeId'],
+                                                  authorized=lambda: self.settings_session() == identity)
+        except PermissionError:
+          self.json(401, {'error': 'Sign in to Galaxy'})
+        except ValueError as error:
+          self.json(400, {'error': str(error)[:200]})
+        except (OSError, RuntimeError):
+          self.json(503, {'error': 'Historical review could not be queued'})
+        else:
+          if self.settings_session() == identity:
+            self.json(202, result)
+          else:
+            self.json(401, {'error': 'Sign in to Galaxy'})
+      elif path == '/api/drives/ignore':
         identity = self.settings_session()
         if identity is None:
           self.json(401, {'error': 'Sign in to Galaxy'})
@@ -3116,6 +3208,8 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
     server.software_operations_source = software_operations_source
   if drive_stats_source is not None:
     server.drive_stats_source = drive_stats_source
+  if route_reviews_source is not None:
+    server.route_reviews_source = route_reviews_source
   legacy_google_removed = False
   def maintain_starport():
     nonlocal legacy_google_removed
@@ -3125,6 +3219,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
       remove_legacy_google_files()
   server.maintain_starport = maintain_starport
   server.start_drive_history = lambda: statistics_owner().start()
+  server.start_route_reviews = lambda: historical_reviews().start()
   return server
 
 
@@ -3142,6 +3237,7 @@ def main():
   args = parser.parse_args()
   with make_server(port=args.port, host=args.host) as server:
     server.start_drive_history()
+    server.start_route_reviews()
     print(f'Galaxy listening on {args.host}:{server.server_port}', flush=True)
     try:
       server.serve_forever()

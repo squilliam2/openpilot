@@ -126,6 +126,10 @@ class _LocalHTTPServer(ThreadingHTTPServer):
       media = getattr(self, 'recording_media_source', None)
       if media is not None:
         media.stop_child()
+      reviews = getattr(self, 'route_reviews_source', None)
+      stop_reviews = getattr(reviews, 'stop_child', None)
+      if callable(stop_reviews):
+        stop_reviews()
       super().server_close()
       return
     # Always close every owned source, even if another cleanup raises. The
@@ -137,7 +141,7 @@ class _LocalHTTPServer(ThreadingHTTPServer):
         cleanup.callback(media.close)
       for name in ('weather_source', 'map_source', 'settings_source', 'vehicle_selection_source', 'toyota_tools_source', 'model_source', 'plots_source',
                    'bluetooth_authority', 'bluetooth_source', 'model_manager_source', 'model_authority', 'layout_authority', 'favorites_source',
-                   'sound_authority', 'sound_source', 'software_operations_source', 'drive_stats_authority', 'drive_stats_source',
+                   'sound_authority', 'sound_source', 'software_operations_source', 'route_reviews_source', 'drive_stats_authority', 'drive_stats_source',
                    'pairing_authority', 'evidence_source', 'device_state_source', 'navigation_source', 'drive_physical_source', 'notification_source',
                    'starport_setup_source'):
         close = getattr(getattr(self, name, None), 'close', None)

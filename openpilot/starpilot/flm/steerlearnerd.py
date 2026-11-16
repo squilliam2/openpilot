@@ -424,6 +424,7 @@ def run(
   live_actor=None,
   live_persistence=None,
   confirmed_history=(),
+  stopped=lambda: False,
 ):
   from openpilot.starpilot.flm.native_health import current_native_health
 
@@ -488,6 +489,9 @@ def run(
   def source_current(*, read=False, publication=False):
     nonlocal source, source_rejected, source_cp_sha256, last_accepted_source
     now = clock()
+    if stopped():
+      clear('learning_process_stopped')
+      return False, now
     if source_rejected and not read:
       return False, now
     if read or source is None or not source.observed_ns <= now <= source.expires_ns:
@@ -586,7 +590,7 @@ def run(
   sink = Sink()
   drain_state = PairedDrainState(control_socket, applied_socket)
   try:
-    while True:
+    while not stopped():
       state = (live_actor.ingress.optimizer.offer_state
                if live_actor is not None and live_actor.ingress is not None else None)
       pending_application = bool(state is not None and state['phase'] in ('trial', 'confirmed') and
@@ -1093,7 +1097,7 @@ def run(
       raise RuntimeError('learner child shutdown reaping unproved')
 
 
-def main():
+def main(*, stopped=None):
   # Imports belong only to the separate optional process. No workerthread/GIL
   # shared with realtime controller processes, no independent selection read.
   from openpilot.starpilot.flm.runtime_adapter_registry import (
@@ -1113,17 +1117,19 @@ def main():
   try:
     if hasattr(os, 'sched_setscheduler'):
       os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
-    os.setpriority(os.PRIO_PROCESS, 0, 0)
+    # exec preserves niceness. A later drive may already be at the receiver's
+    # lower priority; do not require privilege to raise it back to zero.
     from openpilot.starpilot.flm.learner_cpu import configure_cpu
     configure_cpu()
   except OSError:
     # An optional estimator must not inherit realtime scheduling on failure.
     return
   params = Params()
-  CP = messaging.log_from_bytes(params.get('CarParams', block=True), car.CarParams)
-  from opendbc.car.vin import is_valid_vin, VIN_UNKNOWN
-
-  persistent_unit = is_valid_vin(str(CP.carVin)) and str(CP.carVin) != VIN_UNKNOWN
+  stopped = stopped if stopped is not None else lambda: params.get_bool('IsOffroad')
+  raw = params.get('CarParams')
+  if not raw or stopped():
+    return
+  CP = messaging.log_from_bytes(raw, car.CarParams)
   services = [
     'deviceMotion',
     'extrinsicsCalibration',
@@ -1149,9 +1155,17 @@ def main():
     return _configuration_calibration(sm, calibration_lifecycle, now)
 
   def current_source(now, frame):
-    return read_source(CP, params, now_ns=now, cp_sha256=cp_sha256,
+    from dataclasses import replace
+    from openpilot.starpilot.lateral.learning_preferences import read_learning_mode
+
+    source = read_source(CP, params, now_ns=now, cp_sha256=cp_sha256,
       calibration=() if frame is None else frame[1], vehicle_session=vehicle_session,
       calibration_generation='' if frame is None else frame[0])
+    try:
+      selected = read_learning_mode(params, CP) == 'live'
+    except (ValueError, OSError, AttributeError):
+      selected = False
+    return source if selected and not stopped() else replace(source, enabled=False)
 
   def source_reader(now):
     # Observe resets on every loop, but keep settings reads at receipt-renewal rate.
@@ -1173,7 +1187,7 @@ def main():
   def current_sources(identity, epoch):
     now = time.monotonic_ns()
     current = current_source(now, calibration_frame(now))
-    return (identity if persistent_unit and epoch == current.source_epoch else '', current.enabled, current.manual, current.reset)
+    return (identity if current.persistent_source_epoch and epoch == current.source_epoch else '', current.enabled, current.manual, current.reset)
 
   from openpilot.starpilot.flm.training_report import TrainingReporter
 
@@ -1213,9 +1227,14 @@ def main():
       live_actor=LiveTrackingActor(probe_process=ProbeProcess(),source_tracking=True),
       live_persistence=LiveTrialPersistence(params),
       confirmed_history=load_confirmed_history(params),
+      stopped=stopped,
     )
   finally:
     # run() closes/reaps optional children before returning or propagating.
+    for sock in (*getattr(sm, 'sock', {}).values(), control_socket, applied_socket, *getattr(pm, 'sock', {}).values()):
+      close = getattr(sock, 'close', None)
+      if close is not None:
+        close()
     if gc_was_enabled:
       gc.enable()
 

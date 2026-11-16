@@ -1,4 +1,4 @@
-"""Automatic parked route tuning. Live optimization is deliberately deferred."""
+"""Managed parked tuning or explicitly selected qualified live learning."""
 
 import json
 import os
@@ -107,7 +107,8 @@ class StatusReport:
       value = counts.get(key, 0)
       return value if type(value) is int and 0 <= value < 2**63 else 0
 
-    details: dict[str, Any] = {'Analysis runs while parked': True, 'Next-drive trial is reversible': True, 'Physical road improvement proven': False}
+    details: dict[str, Any] = {'Analysis runs while parked': value.get('learning_mode') != 'live',
+                              'Next-drive trial is reversible': True, 'Physical road improvement proven': False}
     if value.get('skipped_routes'):
       details['Skipped recorded drives'] = [list(row) for row in value['skipped_routes'][:16]]
     if value.get('partial_drive') is True:
@@ -345,6 +346,14 @@ def _run():
         if worker is not None:
           restart = True
           break
+        from openpilot.starpilot.flm.learning_mode import selected_mode
+
+        if selected_mode(params) == 'live':
+          from openpilot.starpilot.flm.steerlearnerd import main as run_live
+
+          run_live(stopped=lambda: stopped or params.get_bool('IsOffroad'))
+          restart = not stopped
+          break  # Drop the onroad optimizer image before any parked work.
         report.set({'enabled': True, 'status': 'collecting', 'reason': 'recording_for_offroad_analysis'})
         record_drive(
           params,
@@ -364,6 +373,13 @@ def _run():
           ),
         )
       elif parked() and time.monotonic() >= next_analysis:
+        from openpilot.starpilot.flm.learning_mode import selected_mode
+
+        if selected_mode(params) == 'live':
+          report.set({'status': 'collecting', 'reason': 'live_learning_waiting_for_next_drive',
+                      'enabled': None, 'learning_mode': 'live'})
+          next_analysis = time.monotonic() + 10.
+          continue
         if worker is None:
           from openpilot.starpilot.flm.offroad_worker import OffroadWorker
 

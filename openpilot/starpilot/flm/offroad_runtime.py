@@ -270,6 +270,10 @@ def configure(cp, ci, controller, params, *, manual_status):
   controller.route_flm_scope = None
   controller.route_flm_scope_key = ''
   try:
+    from openpilot.starpilot.lateral.learning_preferences import read_learning_mode
+
+    if cp is not None and read_learning_mode(params, cp) == 'live':
+      return None, 'live_learning_selected'
     scope, numeric, fixed_manual = configuration_data(cp, ci, controller, params, manual_status=manual_status)
     controller.route_flm_scope = scope
     controller.route_flm_scope_key = scope.key()

@@ -7,6 +7,8 @@ import { PollTimer, connectionError } from "./polling.js"
 import { requestJson } from "./startup.js"
 import { bluetoothConnection } from "./bluetooth-notice.js"
 import { FlmBackup } from './flm-backup.js'
+import { FlmRouteReviews } from './flm-route-reviews.js'
+import { FlmLearningMode } from './flm-learning-mode.js'
 import { PlotGraph, PlotsPage, chartGeometry } from "./plots.js"
 import { validTrainingResults, readable, detailText, surfaceRows, coordinateText, trackingView, measurementText, validTrackingValues, trackingPlotView, sourceSeconds, validLearningPreference, SURFACE_GROUPS, tunerStatus, learningReason, sourceCaptureCounts, historyTitle, offroadView, FRICTION_NAMES, offroadCoordinateEvidence, recommendationText } from "./flm-training-results.js"
 
@@ -44,7 +46,7 @@ const PARAMETER_LABELS = {
 
 export const FlmPage = {
   name: "FlmPage",
-  components: { GxState, GxNotice, GxDialog, PlotGraph, PlotsPage, GalaxySettingRow, FlmBackup },
+  components: { GxState, GxNotice, GxDialog, PlotGraph, PlotsPage, GalaxySettingRow, FlmBackup, FlmRouteReviews, FlmLearningMode },
   props: { initialView: { type: String, default: "overview" }, mode: { type: String, required: true }, unauthorized: { type: Function, required: true },
     go: { type: Function, default: path => { window.location.hash = path } } },
   data: () => ({ report: null, error: "", loading: false, request: null, receivedAt: 0, now: 0, bluetooth: bluetoothConnection(),
@@ -314,6 +316,7 @@ export const FlmPage = {
     <GxState v-if="mode !== 'local'">Connect to your device to see its steering tune.</GxState>
     <template v-else>
       <GxNotice v-if="error && view !== 'plots'" tone="danger">{{ error }}</GxNotice>
+      <FlmLearningMode v-if="view === 'overview'" :mode="mode" :unauthorized="unauthorized" />
       <div v-if="view !== 'plots'" class="gx-tuner__connection" role="status"><span class="gx-tuner__status-dot" :data-tone="connectionTone" aria-hidden="true"></span><span>{{ connectionLabel }}</span><span class="gx-tuner__connection-state">{{ currentApplied ? 'Learned tune in use' : preference?.parked ? 'Parked' : live ? 'Driving · use not confirmed' : 'State not confirmed' }}</span></div>
       <GxDialog v-if="manualResetRequested && manualState.pending" labelledby="manual-tune-confirm-title" @close="cancelManualReset"><h3 id="manual-tune-confirm-title">Reset manual tune?</h3><p>{{ manualState.pending.question }}</p><div class="gx-dialog__actions"><button type="button" class="gx-btn gx-btn--tonal" @click="cancelManualReset">Cancel</button><button type="button" class="gx-btn" @click="confirmManualReset">Reset</button></div></GxDialog>
       <nav class="gx-tuner__tabs" role="tablist" aria-label="Tuner views">
@@ -383,6 +386,7 @@ export const FlmPage = {
           <div v-else-if="!offroad" class="gx-tuner__empty"><i class="bi bi-clock-history" aria-hidden="true"></i><h4>{{ current?.status === 'unavailable' ? 'Drive review could not finish' : 'No findings reported yet' }}</h4><p>{{ current?.status === 'unavailable' ? learningReason(current.reason) : 'This will show real collection, trial and rollback events as the learner reports them.' }}</p></div>
           <button v-if="(report?.history.length || 0) > 6" type="button" class="gx-btn gx-btn--tonal" @click="showAllHistory = !showAllHistory">{{ showAllHistory ? 'Show recent activity' : 'Show all reported activity' }}</button>
         </section>
+        <FlmRouteReviews :mode="mode" :unauthorized="unauthorized" />
         <details class="gx-card gx-tuner__section gx-tuner__disclosure"><summary>Diagnostics &amp; source details</summary><dl class="gx-tuner__diagnostics"><template v-if="tracking"><dt>Live learner state</dt><dd>{{ tracking.status }}</dd><dt>Live learner reason</dt><dd>{{ tracking.reason }}</dd></template><template v-if="trackingProgress"><dt>Paired inputs retained</dt><dd>{{ amount(trackingProgress.readyPairs) }}</dd></template><dt>Legacy collector state</dt><dd>{{ readable(current?.status) }}</dd><dt>Legacy collector reason</dt><dd>{{ readable(current?.reason) }}</dd><dt>Legacy retained blocks</dt><dd>{{ amount(current?.progress?.blocks) }}</dd><template v-if="current?.fit"><dt>Latest legacy fit</dt><dd>{{ readable(current.fit.status) }} · {{ readable(current.fit.reason) }}</dd><dt>Training / held-out windows</dt><dd>{{ amount(current.fit.trainWindows) }} / {{ amount(current.fit.heldoutWindows) }}</dd></template><template v-if="losses"><dt>Baseline / candidate loss</dt><dd>{{ losses.baseline.toPrecision(5) }} / {{ losses.learned.toPrecision(5) }}</dd></template><template v-for="[key, value] in details" :key="key"><dt>{{ detailLabel(key) }}</dt><dd>{{ detailText(value) }}</dd></template></dl>
           <template v-if="trackingPlot"><h4>Delay-paired error</h4><PlotGraph :chart="pairedErrorChart" title="Delay-paired steering error" /><p class="gx-tuner__caption">Episode {{ trackingPlot.episodeId }} · {{ trackingPlot.sampled ? 'Selected' : 'All' }} original endpoints. No interpolation.</p><p class="gx-tuner__caption">Control / applied output / pose: {{ sourceSeconds(trackingPlot.points.at(-1).controlMonoTime) }} / {{ sourceSeconds(trackingPlot.points.at(-1).applyMonoTime) }} / {{ sourceSeconds(trackingPlot.points.at(-1).poseMonoTime) }} monotonic seconds.</p></template>
         </details>
