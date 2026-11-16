@@ -324,7 +324,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         params = Params()
         route_reviews_source = RouteReviews(history.root, galaxy_storage_root() / 'route-reviews',
                                            permitted=lambda: statistics_owner()._allowed(),
-                                           device_id=lambda: params.get('DongleId') or '')
+                                           device_id=lambda: params.get('DongleId') or '', params=params)
       server.route_reviews_source = route_reviews_source
       return route_reviews_source
 
@@ -2241,10 +2241,17 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
           self.json(401, {'error': 'Sign in to Galaxy'})
           return
         try:
-          if urlsplit(self.path).query or type(payload) is not dict or set(payload) != {'mode', 'revision'}:
+          if (urlsplit(self.path).query or type(payload) is not dict or
+              set(payload) not in ({'mode', 'revision'}, {'mode', 'convergence', 'revision'}, {'convergence', 'revision'})):
             raise ValueError('Choose a learning mode')
           with effect_lock:
-            result = flm_learning_mode().select(payload['mode'], payload['revision'], authorized=lambda: self.settings_session() == identity)
+            if 'mode' in payload:
+              options = {'convergence': payload['convergence']} if 'convergence' in payload else {}
+              result = flm_learning_mode().select(payload['mode'], payload['revision'],
+                                                  authorized=lambda: self.settings_session() == identity, **options)
+            else:
+              result = flm_learning_mode().select_convergence(payload['convergence'], payload['revision'],
+                                                              authorized=lambda: self.settings_session() == identity)
         except PermissionError:
           self.json(401, {'error': 'Sign in to Galaxy'})
         except ValueError as error:
@@ -2262,11 +2269,13 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
           self.json(401, {'error': 'Sign in to Galaxy'})
           return
         try:
-          if urlsplit(self.path).query or type(payload) is not dict or set(payload) != {'source', 'routeId'}:
+          if (urlsplit(self.path).query or type(payload) is not dict or
+              set(payload) not in ({'source', 'routeId'}, {'source', 'routeId', 'purpose'})):
             raise ValueError('Choose an existing local or Connect route')
           with effect_lock:
+            options = {'purpose': payload['purpose']} if 'purpose' in payload else {}
             result = historical_reviews().request(payload['source'], payload['routeId'],
-                                                  authorized=lambda: self.settings_session() == identity)
+                                                  authorized=lambda: self.settings_session() == identity, **options)
         except PermissionError:
           self.json(401, {'error': 'Sign in to Galaxy'})
         except ValueError as error:

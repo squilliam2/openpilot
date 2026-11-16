@@ -21,6 +21,13 @@ _OWNER = object()
 MAX_FRESH_NS = 100_000_000
 
 
+def source_probe_step(value):
+  """Only the unchanged source step or its explicit bounded double is supported."""
+  if type(value) not in (int, float) or value not in (SOURCE_EXPERIMENT_STEP, 2 * SOURCE_EXPERIMENT_STEP):
+    raise ValueError('A standard or bounded doubled source experiment step is required')
+  return float(value)
+
+
 def _finite(value):
   return (type(value) is int or type(value) is float) and math.isfinite(value)
 
@@ -657,6 +664,7 @@ def probe_endpoint(
   evidence_ns=None,
   queued_ns=None,
   archived_clock=False,
+  source_experiment_step=SOURCE_EXPERIMENT_STEP,
 ):
   """Probe one real endpoint after bounded actual100Hz prefix reconstruction.
 
@@ -665,6 +673,7 @@ def probe_endpoint(
   A genuine <=1s checkpoint and every original tick are mandatory; a missing
   endpoint checkpoint is reconstructed, never filled with a default/model guess.
   """
+  source_experiment_step = source_probe_step(source_experiment_step)
   from openpilot.starpilot.flm.controller_replay import (
     SelectedControllerFactory,
     capture_snapshot,
@@ -950,7 +959,7 @@ def probe_endpoint(
   if base != actual_delivered or not source_only and not certificate.command_low <= -base <= certificate.command_high:
     raise ValueError('actual baseline outside measured command support')
   rows = []
-  probe_step = SOURCE_EXPERIMENT_STEP if source_only else MAX_STEP
+  probe_step = source_experiment_step if source_only else MAX_STEP
   for name in names:
     lower, upper = coordinate_bounds(name)
     minus, plus = max(lower, prior[name] - probe_step), min(upper, prior[name] + probe_step)

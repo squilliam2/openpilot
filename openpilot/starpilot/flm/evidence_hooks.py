@@ -11,7 +11,8 @@ def control_message(message, owner, cc, *, control_ns, state_ns, limited):
   if adapter is None:
     return
   try:
-    evidence = adapter.capture_evidence(control_ns=int(control_ns), state_ns=int(state_ns), active=bool(cc.latActive), limited=bool(limited))
+    evidence = adapter.capture_evidence(control_ns=int(control_ns), state_ns=int(state_ns), active=bool(cc.latActive), limited=bool(limited),
+                                        car_control=cc)
     if not isinstance(evidence, ControlEvidence):
       return
     write_control(message.starpilotLateralState, evidence)

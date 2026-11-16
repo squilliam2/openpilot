@@ -109,10 +109,16 @@ def test_daemon_explicitly_constructs_production_response_process():
   assert len(calls) == 1
   keywords = {item.arg: item.value for item in calls[0].keywords}
   assert not calls[0].args
-  assert set(keywords) == {'probe_process', 'source_tracking', 'parked_candidate'}
-  assert isinstance(keywords['parked_candidate'], ast.Call)
-  assert isinstance(keywords['parked_candidate'].func, ast.Name)
-  assert keywords['parked_candidate'].func.id == 'load_candidate'
+  assert set(keywords) == {'probe_process', 'source_tracking', 'parked_candidate', 'route_import', 'convergence', 'import_observer'}
+  assert isinstance(keywords['parked_candidate'], ast.IfExp)
+  fallback = keywords['parked_candidate'].orelse
+  assert isinstance(fallback, ast.Call) and isinstance(fallback.func, ast.Name) and fallback.func.id == 'load_candidate'
+  imported = keywords['parked_candidate'].body
+  assert isinstance(imported, ast.Call) and isinstance(imported.func, ast.Attribute) and imported.func.attr == 'as_parked_candidate'
+  # Imports are optional preferences for the existing source-tracking actor;
+  # they cannot add a plant-bootstrap process or replace native probe ownership.
+  assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'load_candidate'
+             for node in ast.walk(tree))
   assert isinstance(keywords['source_tracking'], ast.Constant)
   assert keywords['source_tracking'].value is True
   from openpilot.starpilot.flm.live_tracking_actor import LiveTrackingActor

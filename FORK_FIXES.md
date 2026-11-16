@@ -1,6 +1,6 @@
 # Personal Dom fork: FLM and drive history
 
-Updated through [upstream `Dom` 8688217e10f2](https://github.com/StarPilotHQ/StarPilot/commit/8688217e10f2d17321c6e660393d054e2911bb34).
+Updated through [upstream `Dom` b5137efa477e](https://github.com/StarPilotHQ/StarPilot/commit/b5137efa477e8c540941f9e4f9ac25063036c9fd).
 The original investigation used upstream `cfafb8ca72c6`.
 Install branch: [`squilliam2/openpilot:dom`](https://github.com/squilliam2/openpilot/tree/dom).
 Custom software URL: **https://raw.githubusercontent.com/squilliam2/openpilot/dom/installer-dom**.
@@ -65,21 +65,43 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
    comma authentication for its inventory; it does not send that authentication to
    log storage. Cloud downloads happen only on explicit request while parked.
 
-   Each review selects at most 14 evenly spread original segments, including the
-   first and last. Cloud input is capped at 448 MiB, requires 512 MiB free space,
-   and is removed afterward. Reports record segment coverage and omissions,
-   low/high-speed tracking error and error reversals, controller metadata and route
-   scope availability. They can be downloaded as JSON. The review library retains
-   up to 100 records; bounded inventory/coverage is disclosed in the UI.
+   Reviews now attempt **every available original rlog**, with no route-wide
+   segment-count or aggregate-download cap. There is no 50-segment limit. Signed
+   file inventories and completed per-section reports use private SQLite storage.
+   Files are streamed one at a time, checkpointed, then removed. Four newly
+   attempted sections form a resumable scheduling batch, not a route limit.
+   Per-file 32 MiB, free-space, child memory/CPU and cancellation checks remain.
+   Temporary transfer errors retry without discarding completed work. Open local
+   segments remain pending. Damaged compressed files are explicitly omitted;
+   neither their readable prefix nor invented endings become evidence.
 
-   These are **observational reports, not historical tune application**. Legacy
-   recordings without configuration/pose/native evidence cannot become qualified
-   tuning receipts. Unclosed or damaged compressed segments are omitted, not
-   repaired. Missing original rlogs cannot be reconstructed from sparse qlogs.
-   Reviews use a separate bounded, low-priority child, leave logger identity and
-   tuning Params untouched, and pause/reap when the vehicle starts. Reports persist
-   across restart; source changes trigger another review. Removed automatic queue
-   entries cannot fill the library and block newer recordings.
+   **Analyze and queue a qualified tune** is the default request. Analysis-only
+   remains available. Separate original sections vote on a coordinate/direction;
+   repeats of identical bytes cannot vote twice. Vehicle, controller setup and
+   speed/maneuver cohorts stay separate. Even original segment numbers select one
+   candidate; odd numbers independently check that fixed candidate. No-change
+   groups remain in the denominator. At least 80% agreement and a one-sided 95%
+   Wilson lower bound above 0.5 are required in both partitions, with at least
+   three independent sections in each. A long route is not a reason to add the
+   same correction repeatedly.
+
+   Consistent evidence queues a durable, vehicle-bound numerical intent for the
+   existing live or parked tuning engine. It does not write accepted maps itself.
+   A valid original VIN takes precedence; the existing registered-device and ECU
+   firmware fallback is retained. Missing legacy scope metadata is disclosed and
+   cannot be promoted into current native permission. Fresh controller probes,
+   the actual accepted profile, current settings/reset, driver authority, real
+   application feedback and independent future comparisons still decide whether
+   to apply, keep or roll back the trial. Changed scope/profile invalidates an
+   already bound intent rather than rebasing old evidence. Completed intent IDs
+   remain deduplicated on disk without permanently filling the active-job queue.
+
+   Coverage reports distinguish available, attempted, reviewed and omitted
+   sections. The UI shows bounded previews (32 section IDs and 24 metric contexts),
+   while every section/context remains in the disk-backed comparison. These are
+   presentation limits only. The review library/dropdown retains up to 100 routes.
+   Connect imports stay separate from the dashboard's local-drive statistics and
+   never create logger folders or duplicate dashboard distance.
 
 6. **Live + parked finishing is now the default for supported torque vehicles.** Upstream's process
    launcher ran the parked daemon; onroad it recorded for later analysis. Its
@@ -133,7 +155,7 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
    different mathematical/application protocols.
 
 7. **Driver input excludes the affected section, not the whole log segment.**
-   Steering, brake, regen and accelerator flags are collected from original
+   Steering, brake, regen and accelerator transitions are collected from original
    vehicle rows, including input pulses between otherwise valid tracking joins.
    Intervals retain the existing **350 ms before / 1 s after** exclusion buffer.
    A final source-clock pass removes overlapping 2 s or 6 s analysis windows even
@@ -143,6 +165,28 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
    experiment, while completed clean baseline observations remain available.
    Detection depends on the vehicle's recorded input flags; unreported light
    steering contact cannot be inferred from a recording.
+
+   **Steady accelerator use in AOL-only driving remains eligible.** The supplied
+   highway recording holds `gasPressed` throughout an entire minute. Treating
+   that as a lateral override removed all of its steering-learning windows. The
+   actual live Controls capture, physical-response producer and historical
+   readers now share a source-clock policy. The exception requires an original,
+   fresh command with lateral active, normal engagement off and longitudinal
+   control off, plus one second of continuous measured stability. Ordinary
+   engaged-cruise accelerator override remains excluded. Steering, brake, regen,
+   accelerator press/release, stale/invalid data and longitudinal acceleration
+   transients reset the exception; clean sections can qualify again afterwards.
+
+   The current CarState schema records `gasPressed` and `aEgo`, **not numerical
+   pedal position**. The policy uses those actual channels: absolute acceleration
+   at most 0.5 m/s², per-source-step changes at most 0.15 m/s², one-second range at
+   most 0.6 m/s² and smoothed endpoint change at most 0.75 m/s³. Genuine numerical
+   pedal position adds step/range checks when available; a missing channel is
+   never synthesized as zero. A change in pedal magnitude cannot be directly
+   detected before it changes the recorded flag or measured acceleration.
+   Historical override bits remain original and still veto reconstructed/native
+   qualification. Separately classified old AOL tracking can select only an
+   observational intent, which needs fresh native qualification on a new drive.
 
 8. **The current upstream revision string could stop evidence recording.**
    Upstream's new `selected-steering-compatibility-v1:` plus SHA-256 exceeds
@@ -235,9 +279,36 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
     `/data/starpilot-installer.log`. It does not modify AGNOS or graphics packages.
     Existing software must first be uninstalled through its normal UI.
 
+12. **Optional faster convergence uses larger measured trials, not theoretical permission.**
+    The per-vehicle **Faster convergence (experimental)** toggle is off by default
+    and can be saved only while parked. Ordinary upstream tuning remains active
+    when no import qualifies. Stronger import support requires at least 12
+    independent sections in each partition, at least 95% directional agreement,
+    and a Wilson lower bound of at least 0.7 in each.
+
+    In source-tracking live mode, the supported coordinate can use a 0.02 trial
+    instead of the existing 0.01 trial, only after the actual native replay probes
+    those exact clipped endpoints. Requested amplitude is bound into the replay
+    context and result. Smaller or mixed-amplitude probes cannot authorize the
+    larger trial, including after an interruption. Initial priority expires after
+    60 seconds; recovery preserves its original probe size and selector expiry.
+    A fitted-model path may double its existing confidence factor within the
+    unchanged 0.05 maximum. Slew remains 0.005 per second. Parked proposals may
+    double a supported single-coordinate step within the existing 0.01 route
+    limit, before their original training/native/held-out checks. Coupled maps are
+    not relabeled as one imported coordinate. Synthetic scenarios test these
+    contracts; they do not establish real-road improvement.
+
+    Live and parked imports report waiting, queued, native trial offered,
+    confirmed, rejected/rolled back and stale states separately. An offered
+    trial is not an applied/confirmed tune. Driver input or faults interrupt a
+    trial without pretending that a negative measured outcome occurred. Parked
+    success states use the existing accepted/retained-after-drive outcomes, and
+    a later genuine native rollback updates the import's terminal status too.
+
 ## Verification
 
-- Final affected Python regression suite: **1,075 passed**, with **269 passing subtests**.
+- Final affected Python regression suite: **1,405 passed**, with **269 passing subtests**.
   Existing tests emit one
   multiprocessing warning and three Cap'n Proto repeated-write warnings.
 - Recovery fixtures run the actual isolated parked fitter after an indoor reboot,
@@ -252,10 +323,23 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
   radar association, model smoothing, speed control and update startup. The source
   copy needs its own declared dirty QA build metadata and source-built x86 vision
   IPC binding; these QA-only artifacts are not part of the device download.
-- The latest upstream merge additionally passes **1,623 tests and 100 subtests**
+- An earlier upstream merge additionally passed **1,623 tests and 100 subtests**
   with two skips across Hyundai display ownership, Toyota intent/source gaps,
   regional settings migration, Home branch labels, browser setup and retained-OS
-  update contracts. The 1,075-test FLM/Galaxy suite was repeated on this merge.
+  update contracts. Current Volvo and speed-limit suites pass **1,282 tests and
+  585 subtests**, including unsupported-PSCM withdrawal and SLC input validation.
+- Full-route stream tests cover 51, 355, 513 and 1,001 available sections without
+  a route-count cutoff, persisted progress, transient transfer retries, original
+  byte deduplication, damaged-tail omissions and bounded report previews. Actual
+  HTTP tests exercise the default tuning request, analysis-only compatibility,
+  authentication/origin checks, complete-route comparison and durable intent
+  queueing without accepted-map writes.
+- Actual Cereal/Controls tests qualify steady AOL accelerator use and withdraw
+  collection on steering/brake/regen, pedal release, acceleration transients,
+  stale sources and native withdrawal. Original controller override bits remain
+  strict in historical native qualification. Exact larger native probes are
+  required again after interruption; lifecycle tests cover actual parked storage
+  resolution, later rollback, stale scopes and completed-job deduplication.
 - Installer contracts: **24 tests passed**, Ruff and pinned ty passed, and a
   clean second ARM build was byte-identical. The 597,856-byte ELF has SHA-256
   `9163ed8a8820308800d5b7c811411a292addd51a7acfed08dfa5487853264404`.
@@ -277,7 +361,7 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
   saved values remain available, and no current steering application is claimed.
 - Regression coverage includes registered Sonata parked/live scope agreement,
   different devices/firmware/reset generations, missing identity refusal,
-  355-segment admission and 513-segment refusal, damaged/interior/cancelled logs,
+  legacy 355-segment admission and 513-segment refusal, damaged/interior/cancelled logs,
   durable partial statistics, replacement after repair, exclusions, HTTP access,
   controller replay, persistence and shutdown.
 - Live-mode integration with a discovered VIN reaches the actual Controls
@@ -293,11 +377,13 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
   unrelated clean sections on both sides.
 - Full FLM/Controls Ruff and lockfile-pinned **ty 0.0.80** checks pass. A newer ty
   version changes rule behavior; QA uses the repository's locked tool version.
-- Eight intact dense rlogs sampled from the supplied drive produce **84
-  uninterrupted tracking windows** across both speed cohorts in the real bounded
-  review subprocess, despite unknown VIN and missing route scope. The unfinished
-  final segment is omitted. This is sampled diagnostic coverage, not a full-route
-  tune or proof of its cause.
+- Eight intact dense rlogs sampled from the supplied drive produced **84
+  diagnostic windows** before the pedal/transient policy. Blanket accelerator
+  exclusion reduced this to **2**; the new source-qualified steady-AOL policy
+  retains **43 clean tracking windows**. The unfinished final segment is still
+  omitted. These eight sections do not support a full-route tuning consensus;
+  no accepted map was written. This sample is separate from attempting every
+  available section of a requested full Connect route.
 - The patched analyzer processed all 355 qlogs from the supplied drive: **536,749
   meters (333.5 miles), 21,235.775 seconds, 15.3% normal engagement and 75.6% AOL
   steering-only time**, excluding the damaged final segment. Upstream returned

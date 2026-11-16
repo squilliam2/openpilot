@@ -30,6 +30,27 @@ POLICY = 'bounded_provisional_next_drive_v1'
 RECORDED_ASSESSOR = analyze_latest
 MAX_TRIAL_SEGMENTS = 4096
 ZERO = dict.fromkeys(NAMES, 0.0)
+
+
+def matches_imported_proposal(proposal: dict[str, Any], current: dict[str, float], imported: Any) -> bool:
+  """Normalize the existing stable namespace without relabeling coupled maps."""
+  if imported is None or proposal['parameter'].removeprefix('stable:') != imported.name or proposal['delta'] * imported.delta <= 0:
+    return False
+  changed = {name for name, value in proposal['values'].items() if value != current[name]}
+  return changed == {imported.name}
+
+
+def stronger_import_step(proposal: dict[str, Any], current: dict[str, float], name: str) -> dict[str, Any]:
+  """Fixed stronger proposal before original training/held-out native checks."""
+  from openpilot.starpilot.flm.offroad_surface import route_bounds
+  if any(value != current[key] for key, value in proposal['values'].items() if key != name):
+    return proposal
+  low, high = route_bounds(name)
+  delta = max(-MAX_ROUTE_STEP, min(MAX_ROUTE_STEP, 2 * proposal['delta']))
+  target = max(low, min(high, current[name] + delta))
+  return dict(proposal, values=dict(current, **{name: target}), delta=target - current[name])
+
+
 from openpilot.starpilot.lateral.torque_settings import DOCUMENT_KEY, LEGACY_KEYS
 
 SETTINGS = tuple(
@@ -1154,15 +1175,38 @@ class OffroadWorker:
         )
         if not saved:
           raise ValueError('Next-drive outcome compare-and-swap refused')
+        imported_id = trial.get('route_import_intent_id')
+        if imported_id is not None and outcome['outcome'] in ('accepted_after_drive', 'retained_after_drive', 'rolled_back'):
+          from openpilot.starpilot.flm.route_tuning_import import mark_state
+          try:
+            mark_state(self.params, imported_id, 'rolled_back' if outcome['outcome'] == 'rolled_back' else 'confirmed',
+                       runtime_event=True, reason=outcome['reason'])
+          except (OSError, ValueError):
+            pass
         status = 'ready_for_next_drive' if outcome['outcome'] == 'pending' else outcome['outcome']
         reason = outcome['reason']
     else:
       # Freeze input-only ranking; training may select a candidate, validation may not.
       choices.sort(key=lambda v: (-input_coverage(v[1]), -v[1]['whole_windows'], v[1]['cohort'], v[0]['original_context_sha256']))
+      imported = None
+      try:
+        from openpilot.starpilot.flm.route_tuning_import import load_pending
+        imported = load_pending(self.params, assessment.cp, scope, current, 'parked')
+      except (OSError, ValueError, TypeError, AttributeError):
+        pass
+      if imported is not None:
+        preferred = [choice for choice in choices if matches_imported_proposal(choice[2], current, imported)]
+        choices = preferred + [choice for choice in choices if choice not in preferred]
       recommendations_ready()
       training_seen = set()
       training_spans = set()
       for group, cohort, proposal in choices:
+        imported_choice = matches_imported_proposal(proposal, current, imported)
+        if imported_choice and imported is not None and imported.faster_evidence_supported:
+          from openpilot.starpilot.lateral.learning_preferences import read_convergence_mode
+          if (read_convergence_mode(self.params, assessment.cp) == 'faster' and
+              all(value == current[name] for name, value in proposal['values'].items() if name != imported.name)):
+            proposal = stronger_import_step(proposal, current, imported.name)
         selected_profile_windows = cohort['whole_windows']
         offered = {'values': proposal['values'], 'parameter': proposal['parameter'], 'delta': proposal['delta']}
         blocked = rejected_trial_change(self.cache, row, proposal)
@@ -1257,6 +1301,8 @@ class OffroadWorker:
                   if w['identity'] in set(cohort['training']['windows']) | set(cohort['heldout']['windows'])
                 ],
               }
+              if imported_choice and imported is not None:
+                record['route_import_intent_id'] = imported.intent_id
               if 'qualification_roles' in cohort:
                 roles = cohort['qualification_roles']
                 ids = set(roles['training']['windows']) | set(roles['heldout']['windows'])
@@ -1299,6 +1345,12 @@ class OffroadWorker:
               saved = RouteStorage(self.params).save(new, expected=expected, authorized=original_sources_current)
               if not saved:
                 raise ValueError('Next-drive tune compare-and-swap refused')
+              if imported_choice and imported is not None:
+                from openpilot.starpilot.flm.route_tuning_import import mark_state
+                try:
+                  mark_state(self.params, imported.intent_id, 'native_trial_offered', runtime_event=True)
+                except (OSError, ValueError):
+                  pass
               status = 'ready_for_next_drive'
               reason = 'bounded_trial_configured_for_next_drive'
             else:

@@ -4,7 +4,7 @@ import hashlib
 
 from opendbc.car.structs import car
 from openpilot.starpilot.lateral.learning_preferences import (
-  KEY, MAX_BYTES, LEGACY_KEY, learning_mode, read_preference, replace_learning_mode,
+  KEY, MAX_BYTES, LEGACY_KEY, convergence_mode, learning_mode, read_preference, replace_convergence_mode, replace_learning_mode,
 )
 from openpilot.starpilot.saved_document import commit_exact
 from openpilot.starpilot.saved_source import read_saved
@@ -44,12 +44,24 @@ class LearningMode:
       if any(read_saved(self.params, key, limit) != values[key] for key, limit in keys):
         raise ValueError('Vehicle configuration changed')
       return {'version': 1, 'available': True, 'parked': bool(self.parked()), 'vehicle': str(cp.carFingerprint),
-              'mode': learning_mode(values[KEY][0], cp), 'enabled': preference.enabled, 'revision': revision,
+              'mode': learning_mode(values[KEY][0], cp), 'convergence': convergence_mode(values[KEY][0], cp),
+              'enabled': preference.enabled, 'revision': revision,
               'identitySource': 'original_vin' if is_valid_vin(str(cp.carVin)) and str(cp.carVin) != VIN_UNKNOWN else 'device_firmware_fallback'}
     except Exception:
-      return {'version': 1, 'available': False, 'parked': False, 'vehicle': None, 'mode': None, 'enabled': None, 'revision': None}
+      return {'version': 1, 'available': False, 'parked': False, 'vehicle': None, 'mode': None,
+              'convergence': None, 'enabled': None, 'revision': None}
 
-  def select(self, mode, revision, *, authorized):
+  def select(self, mode, revision, *, authorized, convergence=None):
+    if mode not in ('parked', 'live'):
+      raise ValueError('Choose parked or live learning')
+    return self._select(mode, convergence, revision, authorized=authorized)
+
+  def select_convergence(self, convergence, revision, *, authorized):
+    if convergence not in ('standard', 'faster'):
+      raise ValueError('Choose standard or faster convergence')
+    return self._select(None, convergence, revision, authorized=authorized)
+
+  def _select(self, mode, convergence, revision, *, authorized):
     if not authorized():
       raise PermissionError('Galaxy session expired')
     if not self.parked():
@@ -57,7 +69,11 @@ class LearningMode:
     cp, keys, values, preference, current = self._read()
     if revision != current:
       raise ValueError('Vehicle or learning preferences changed; refresh before selecting a mode')
-    raw = replace_learning_mode(values[KEY][0], cp, mode)
+    raw = values[KEY][0] if mode is None else replace_learning_mode(values[KEY][0], cp, mode)
+    if convergence is not None:
+      raw = replace_convergence_mode(raw, cp, convergence)
+    if raw is None:
+      raise ValueError('Choose a learning preference to update')
 
     def permitted():
       return authorized() and self.parked() and all(read_saved(self.params, key, limit) == values[key] for key, limit in keys if key != KEY)

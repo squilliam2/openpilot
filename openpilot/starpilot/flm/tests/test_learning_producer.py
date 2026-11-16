@@ -15,9 +15,9 @@ class TestAutomaticLearningProducer(unittest.TestCase):
     lateral = SimpleNamespace(which=lambda: 'torqueState', torqueState=lc)
     self.now = 10_000_000_000
     values = {
-      'carState': SimpleNamespace(vEgo=20., steeringPressed=False, brakePressed=False, gasPressed=False,
+      'carState': SimpleNamespace(vEgo=20., steeringPressed=False, brakePressed=False, gasPressed=False, regenBraking=False, gas=0., aEgo=0.,
                                  canValid=True, canTimeout=False, steeringAngleDeg=1., steeringTorque=0.),
-      'carControl': SimpleNamespace(latActive=True, actuators=SimpleNamespace(torque=-.1)),
+      'carControl': SimpleNamespace(latActive=True, enabled=True, longActive=False, actuators=SimpleNamespace(torque=-.1)),
       'carOutput': SimpleNamespace(actuatorsOutput=SimpleNamespace(torque=-.1)),
       'controlsState': SimpleNamespace(lateralControlState=lateral),
       'deviceMotion': SimpleNamespace(timestamp=self.now, angularVelocityDevice=SimpleNamespace(valid=True),

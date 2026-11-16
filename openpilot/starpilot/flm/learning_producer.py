@@ -12,6 +12,7 @@ from openpilot.selfdrive.locationd.helpers import Pose, PoseCalibrator
 from openpilot.starpilot.flm.automatic import EvidenceWindow, PhysicalPoint, evaluate_linear_factor, identity_digest, linear_policy
 from openpilot.starpilot.flm.gm_evidence import FLMSample
 from openpilot.starpilot.flm.learning_source import VERSION, conversion_identity, identity_for, learning_payload
+from openpilot.starpilot.flm.driver_exclusions import AolPedalPolicy
 from openpilot.starpilot.lateral.controller_selection import read_selection
 
 
@@ -46,6 +47,7 @@ class AutomaticLearningProducer:
     self.result_bounds = None
     self.evaluated_blocks = 0
     self.last_evaluation_ns = None
+    self.pedal_policy = AolPedalPolicy()
 
   def split(self, reason, *, hard=False, eligibility=True):
     self.rows, self.points = [], []
@@ -55,6 +57,7 @@ class AutomaticLearningProducer:
     if eligibility:
       self.active_since_ns = None
     if hard:
+      self.pedal_policy.reset()
       self.result = None
       self.result_bounds = None
       self.evaluated_blocks = 0
@@ -104,18 +107,25 @@ class AutomaticLearningProducer:
         self.split('identity_or_preference_changed', hard=True)
       self.identity, self.refresh_ns = identity, now
     if self.identity is None:
+      self.pedal_policy.reset()
       self.split('unavailable')
       return
     required = ['carState', 'carControl', 'carOutput', 'controlsState', 'deviceMotion', 'extrinsicsCalibration', 'lateralDelay']
     if not sm.all_checks(required):
+      self.pedal_policy.reset()
       self.split('source_checks')
       return
     age_limits = {'carState': 100_000_000, 'carControl': 100_000_000, 'carOutput': 100_000_000,
                   'controlsState': 100_000_000, 'deviceMotion': 100_000_000, 'lateralDelay': 500_000_000}
     if any(not sm.seen[s] or not 0 <= boot - sm.logMonoTime[s] <= limit for s, limit in age_limits.items()):
+      self.pedal_policy.reset()
       self.split('source_age')
       return
     cs, cc = sm['carState'], sm['carControl']
+    driver_override = self.pedal_policy.observe(cs, cc, state_ns=int(sm.logMonoTime['carState']), command_ns=int(sm.logMonoTime['carControl']),
+                                                state_valid=bool(cs.canValid and not cs.canTimeout))
+    if driver_override:
+      self.excluded_until = boot + 1_000_000_000
     dm = sm['deviceMotion']
     if not 0 < int(dm.timestamp) <= boot or boot - int(dm.timestamp) > 100_000_000:
       self.split('pose_source_age')
@@ -142,8 +152,7 @@ class AutomaticLearningProducer:
     if sm.updated['carState']:
       self.speed_times.append(sm.logMonoTime['carState'] * 1e-9 + lag)
       self.speeds.append(cs.vEgo)
-    if cs.steeringPressed or cs.brakePressed or cs.gasPressed:
-      self.excluded_until = boot + 1_000_000_000
+    if driver_override:
       self.split('driver_override')
       return
     if boot < self.excluded_until or not cc.latActive or not cs.canValid or cs.canTimeout:

@@ -216,7 +216,7 @@ class RecordedInputs:
 
 def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segments=False):
   from openpilot.starpilot.flm.offroad_control_metadata import read_control_metadata as read_control
-  from openpilot.starpilot.flm.driver_exclusions import DriverExclusions
+  from openpilot.starpilot.flm.driver_exclusions import DriverExclusions, recorded_driver_exclusions
 
   state = {'cp': None, 'cp_sha': None, 'context': None}
   windows = {}
@@ -243,6 +243,7 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
   }
   quality_stops = []
   driver_inputs = DriverExclusions()
+  observed_driver_inputs = DriverExclusions()
   segment_bounds = {}
 
   def metadata_for(control, domain):
@@ -278,6 +279,10 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
     applied_count = 0
     timeline = []
     point_count = 0
+    _, driver_decisions, pedal_policy = recorded_driver_exclusions(events)
+    counts['steady_aol_accelerator_rows'] = counts.get('steady_aol_accelerator_rows', 0) + pedal_policy.accepted_gas_rows
+    counts['excluded_accelerator_rows'] = counts.get('excluded_accelerator_rows', 0) + pedal_policy.excluded_gas_rows
+    counts['numeric_pedal_position_rows'] = counts.get('numeric_pedal_position_rows', 0) + pedal_policy.numeric_pedal_position_rows
     for index, event in enumerate(events):
       if index % 128 == 0 and not permitted():
         raise ValueError('Parked analysis cancelled')
@@ -287,9 +292,9 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
         first, last = segment_bounds.get(segment, (stamp, stamp))
         segment_bounds[segment] = (min(first, stamp), max(last, stamp))
       if kind == 'carState':
-        cs = event.carState
-        if cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed:
+        if driver_decisions.get(stamp, True):
           driver_inputs.observe(int(event.logMonoTime))
+          observed_driver_inputs.observe(int(event.logMonoTime))
       if kind == 'carControl':
         counts['recorded_lateral_request_rows'] += 1
         counts['active_lateral_request_rows'] += bool(event.carControl.latActive)
@@ -343,7 +348,17 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
         if context is None:
           context = ('original_mode_unrecorded', 'original_revision_unrecorded', 'original_baseline_unrecorded')
         key = hashlib.sha256(repr((state['cp_sha'], subtype, context)).encode()).hexdigest()
-        point = read_point(event, companions, route=route['routeId'], segment=segment, context_key=key)
+        original_state = companions.get('carState')
+        point_override = True
+        if original_state is not None:
+          cs = original_state.carState
+          # Press/release and settling buffers are applied to completed source
+          # windows below. A release-only point must not shift the known-zero
+          # six-second grid and erase unrelated clean children before it.
+          point_override = bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking or
+                                cs.gasPressed and driver_decisions.get(int(original_state.logMonoTime), True))
+        point = read_point(event, companions, route=route['routeId'], segment=segment, context_key=key,
+                           driver_override=point_override)
         if point is None:
           counts['missing_join'] += 1
           continue
@@ -430,9 +445,10 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
   # missing, and sees the NEXT segment before approving the prior bookend.
   # Only overlapping analysis windows are removed; other sections survive.
   driver_inputs.finish()
+  observed_driver_inputs.finish()
   removed = set()
   if driver_inputs.intervals:
-    for table in (windows, stable_windows, baseline_tracking, raw_windows):
+    for table in (windows, stable_windows, baseline_tracking):
       for context in tuple(table):
         retained = []
         for window in table[context]:
@@ -447,6 +463,20 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
     for sources in observed.values():
       for source in sources:
         source['windows'] = [w for w in source['windows'] if not driver_inputs.overlaps(w['start_ns'], w['end_ns'])]
+  # Raw tracking supplies only observational intents. Its pedal classification
+  # comes from original state/command rows; original controller override bits
+  # still independently veto every reconstructible/native-qualified window.
+  for context in tuple(raw_windows):
+    retained = []
+    for window in raw_windows[context]:
+      if observed_driver_inputs.overlaps(window.points[0].mono_ns, window.points[-1].mono_ns):
+        removed.add(window.identity)
+      else:
+        retained.append(window)
+    if retained:
+      raw_windows[context] = retained
+    else:
+      del raw_windows[context]
   counts['driver_input_intervals'] = len(driver_inputs.intervals)
   counts['driver_input_excluded_windows'] = len(removed)
   counts['original_segments_reviewed'] = len(getattr(receipt, 'decoded_segments', receipt.segments))

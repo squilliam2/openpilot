@@ -12,6 +12,9 @@ on:
       - 'tools/installer/**'
       - 'installer-dom*'
       - 'openpilot/starpilot/galaxy/drive_history.py'
+      - 'openpilot/starpilot/galaxy/*route*.py'
+      - 'openpilot/starpilot/galaxy/flm_learning_mode.py'
+      - 'openpilot/starpilot/galaxy/tests/test_*route*.py'
       - 'openpilot/selfdrive/controls/lib/latcontrol*'
       - 'openpilot/selfdrive/controls/controlsd.py'
       - 'openpilot/system/manager/process_config.py'
@@ -70,7 +73,7 @@ jobs:
         timeout-minutes: 10
         run: scons
       - name: Test producer capture, clocks, offroad recommendations, startup and rollback
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: |
           tools/op.sh test \
             openpilot/starpilot/flm/tests/test_offroad_backend.py \
@@ -87,12 +90,24 @@ jobs:
             openpilot/starpilot/flm/tests/test_live_mode_selection.py \
             openpilot/starpilot/flm/tests/test_live_parked_finish.py \
             openpilot/starpilot/flm/tests/test_power_loss_recovery.py \
+            openpilot/starpilot/flm/tests/test_full_route_review.py \
+            openpilot/starpilot/flm/tests/test_route_tuning_consensus.py \
+            openpilot/starpilot/flm/tests/test_route_tuning_import.py \
+            openpilot/starpilot/flm/tests/test_import_trial_integration.py \
+            openpilot/starpilot/flm/tests/test_import_parked_lifecycle.py \
+            openpilot/starpilot/flm/tests/test_faster_native_probe.py \
+            openpilot/starpilot/flm/tests/test_convergence_preferences.py \
+            openpilot/starpilot/flm/tests/test_aol_pedal_learning.py \
+            openpilot/starpilot/flm/tests/test_aol_live_learning.py \
             openpilot/starpilot/flm/tests/test_live_trial_global_runtime.py \
             openpilot/starpilot/flm/tests/test_control_wire_fields.py \
             openpilot/starpilot/flm/tests/test_steering_compatibility.py \
             openpilot/starpilot/galaxy/tests/test_drive_history.py \
             openpilot/starpilot/galaxy/tests/test_drive_analysis.py \
             openpilot/starpilot/galaxy/tests/test_drive_stats.py \
+            openpilot/starpilot/galaxy/tests/test_stream_route_review.py \
+            openpilot/starpilot/galaxy/tests/test_connect_route_stream.py \
+            openpilot/starpilot/galaxy/tests/test_full_route_review_api.py \
             tools/installer/tests/test_static_installer.py \
             --json-output ci-results/flm-offroad.json
           .venv/bin/python -m pytest -q --import-mode=importlib \

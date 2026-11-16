@@ -2,13 +2,14 @@ import { requestJson } from './startup.js'
 import { PollTimer } from './polling.js'
 
 export const validLearningMode = value => value?.version === 1 && typeof value.available === 'boolean' && typeof value.parked === 'boolean' &&
+  (value.convergence === undefined || ['standard', 'faster'].includes(value.convergence) || !value.available && value.convergence === null) &&
   (!value.available || ['parked', 'live'].includes(value.mode) && typeof value.enabled === 'boolean' &&
     typeof value.vehicle === 'string' && typeof value.revision === 'string' && /^[0-9a-f]{64}$/.test(value.revision))
 
 export const FlmLearningMode = {
   name: 'FlmLearningMode',
   props: { mode: { type: String, required: true }, unauthorized: { type: Function, required: true } },
-  data: () => ({ state: null, choice: 'live', dirty: false, request: null, error: '', saved: false, alive: false }),
+  data: () => ({ state: null, choice: 'live', convergenceChoice: 'standard', dirty: false, request: null, error: '', saved: false, alive: false }),
   mounted() {
     this.alive = true
     this.poller = new PollTimer({ read: () => this.load(), interval: 5000 })
@@ -22,13 +23,14 @@ export const FlmLearningMode = {
       this.request = request
       try {
         const value = await requestJson('./api/flm/mode', { request: { signal: request.signal,
-          ...(save ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: this.choice, revision: this.state.revision }) } : {}),
+          ...(save ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: this.choice,
+            convergence: this.convergenceChoice, revision: this.state.revision }) } : {}),
         } })
         if (!this.alive || this.request !== request || request.signal.aborted) return
         if (!validLearningMode(value)) throw new Error('The learning-mode response is unavailable.')
         this.state = value; this.error = ''
         if (save) { this.dirty = false; this.saved = true }
-        if (!this.dirty && value.available) this.choice = value.mode
+        if (!this.dirty && value.available) { this.choice = value.mode; this.convergenceChoice = value.convergence || 'standard' }
       } catch (error) {
         if (!this.alive || this.request !== request || request.signal.aborted) return
         if (error.status === 401 || ['access_unavailable', 'setup_required'].includes(error.code)) {
@@ -46,10 +48,12 @@ export const FlmLearningMode = {
     <template v-else>
       <form @submit.prevent="save" class="gx-route-reviews__form">
         <label>Learning mode<select v-model="choice" @change="dirty = true; saved = false" :disabled="!state.parked || !!request"><option value="live">Live + parked finishing · default</option><option value="parked">Offroad only · next-drive tune</option></select></label>
+        <label><input type="checkbox" :checked="convergenceChoice === 'faster'" @change="convergenceChoice = $event.target.checked ? 'faster' : 'standard'; dirty = true; saved = false" :disabled="!state.parked || !!request">Faster convergence (experimental)</label>
         <button type="submit" class="gx-btn gx-btn--tonal" :disabled="!state.parked || !!request || !dirty">Save for next drive</button>
       </form>
       <p v-if="saved" role="status">Saved. This mode starts on the next drive.</p>
       <p v-if="!state.enabled" class="gx-tuner__caption">Auto Learn is off for this vehicle. Choosing a mode does not turn it on.</p>
+      <p class="gx-tuner__caption">Faster convergence is optional and off by default. Larger supported steps require consistent measured evidence and fresh controller checks. It preserves steering bounds, independent trial comparisons and rollback; theoretical scenarios alone cannot approve a tune.</p>
       <p class="gx-tuner__caption">{{ state.identitySource === 'original_vin' ? 'Vehicle binding uses the original discovered VIN.' : 'Original VIN discovery returned unknown; the device-and-firmware fallback is used when available.' }}</p>
     </template>
     <p class="gx-tuner__caption">Parked results guide a new qualified live trial on the next drive. They do not confirm an interrupted experiment. Driver input excludes the affected interval and settling buffer; clean sections remain usable. Live updates require fresh controller/native evidence and still need validation on your car.</p>

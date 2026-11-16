@@ -18,6 +18,7 @@ from openpilot.starpilot.flm.runtime_adapter_registry import (
 from openpilot.starpilot.flm.learning_wire import read_runtime_admission, read_source_receipt
 from openpilot.starpilot.flm.fullrate_collector import ControlEvidence
 from openpilot.starpilot.flm.torque_adapter import Objective, Admission, TorqueStageOwner
+from openpilot.starpilot.flm.driver_exclusions import AolPedalPolicy
 
 
 def native_witness_current(native, *, now_ns, active):
@@ -104,6 +105,8 @@ class GlobalRuntime:
     self.centre_raw = ()
     self.centre_result = (0.0, 0.0)
     self.torque_result = (0.0, 0.0)
+    self.pedal_policy = AolPedalPolicy()
+    self._driver_cs = None
     if self.descriptor is not None and self.descriptor.domain == 'torque':
       from openpilot.starpilot.flm.torque_observation import TorqueObservation
 
@@ -641,6 +644,9 @@ class GlobalRuntime:
     return None
 
   def begin_frame(self, cs, vm, params, *, active, safety_limited, desired_curvature, curvature_limited, lat_delay, raw_model_curvature, model_source_ns):
+    # Preserve the actual current input even on an ineligible frame so a short
+    # driver interruption cannot disappear between eligible captures.
+    self._driver_cs = cs
     self.frame_sequence += 1
     if self.observation is not None:
       self.observation.begin_frame()
@@ -867,7 +873,20 @@ class GlobalRuntime:
         ack.physical_model_revision,
       )
 
-  def capture_evidence(self, *, control_ns, state_ns, active, limited):
+  def capture_evidence(self, *, control_ns, state_ns, active, limited, car_control=None):
+    cs = self._driver_cs if self._driver_cs is not None else (None if self.frame is None else self.frame[0])
+    if car_control is None:
+      # Direct/older source callers retain the original strict pedal veto.
+      self.pedal_policy.reset()
+      driver_override = cs is None or bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed)
+    else:
+      sm = getattr(self, '_live_sm', None)
+      state_valid = bool(sm is not None and sm.all_checks(['carState']) and int(sm.logMonoTime['carState']) == state_ns
+                         and self.healthy and self.eligible and cs is not None and cs.canValid and not cs.canTimeout)
+      command_valid = bool(type(active) is bool and car_control.latActive == active and self.active == active
+                           and 0 <= control_ns - self.now_ns <= 30_000_000)
+      driver_override = self.pedal_policy.observe(cs, car_control, state_ns=state_ns, command_ns=control_ns,
+                                                 state_valid=state_valid, command_valid=command_valid)
     if self.descriptor is None or self.frame is None or self.source is None or not self.identity:
       return None
     cs, vm, params, log, desired, curvature_limited, delay, requested, values, p, i, d, raw_command = self.frame
@@ -1063,7 +1082,7 @@ class GlobalRuntime:
       bool(self.source.manual or self.live_manual),
       active,
       bool(cs.canValid and not cs.canTimeout and self.healthy and self.eligible),
-      bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed),
+      driver_override,
       bool(cs.steerFaultTemporary or cs.steerFaultPermanent),
       bool(log.saturated),
       bool(limited or curvature_limited),

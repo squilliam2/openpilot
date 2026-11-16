@@ -91,7 +91,7 @@ def torque_vehicle(cp):
   )
 
 
-def read_point(event, companions, *, route, segment, context_key):
+def read_point(event, companions, *, route, segment, context_key, driver_override=None):
   """Read recorded status and nearby recorded companions, never a live receipt.
 
   Companion headers are retained explicitly. This is diagnostic alignment,
@@ -110,6 +110,8 @@ def read_point(event, companions, *, route, segment, context_key):
       return None
   cs = companions['carState'].carState
   cc = companions['carControl'].carControl
+  if driver_override is not None and type(driver_override) is not bool:
+    return None
   value = getattr(state, kind)
   domain, desired_name, actual_name = DOMAINS[kind]
   if any(name not in value.schema.fields for name in (desired_name, actual_name, 'active', 'saturated')):
@@ -130,7 +132,7 @@ def read_point(event, companions, *, route, segment, context_key):
     int(companions['carControl'].logMonoTime),
     int(output.logMonoTime) if output_current else 0,
     bool(value.active and cc.latActive),
-    bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed),
+    bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed) if driver_override is None else driver_override,
     bool(value.saturated),
     bool(cs.canValid and not cs.canTimeout and not cs.steerFaultTemporary and not cs.steerFaultPermanent),
   )

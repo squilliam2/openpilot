@@ -577,6 +577,12 @@ class TrackingEpisodeBuilder:
       gain = abs(row.physical_derivative * (row.plus_coordinate - row.minus_coordinate) / native_width)
       return abs(native) * gain * MAX_STEP / abs(coordinate)
 
+    def common_width(values, side):
+      widths = {abs(getattr(row, side + '_coordinate') - row.baseline_coordinate) for _, row in values}
+      # A larger replay endpoint does not establish the native quantization
+      # result at a smaller amplitude. Mixed widths establish neither one.
+      return next(iter(widths)) if len(widths) == 1 else 0.
+
     return tuple(
       HookSensitivity(
         name,
@@ -590,6 +596,8 @@ class TrackingEpisodeBuilder:
         sum(row.plus_delivered != row.baseline_delivered for _, row in values),
         math.sqrt(sum(directed_effect(row, 'minus')**2 for _, row in values) / len(values)),
         math.sqrt(sum(directed_effect(row, 'plus')**2 for _, row in values) / len(values)),
+        minus_probed_step=common_width(values, 'minus'),
+        plus_probed_step=common_width(values, 'plus'),
       )
       for name, values in rows.items()
       if values

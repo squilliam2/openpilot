@@ -43,7 +43,7 @@ def _decode(raw):
     document = json.loads(raw, object_pairs_hook=_unique)
   except RecursionError as error:
     raise ValueError('Preference nesting exceeds parser limits') from error
-  if (not isinstance(document, dict) or not {'version', 'vehicles'} <= set(document) or set(document) - {'version', 'vehicles', 'modes'} or
+  if (not isinstance(document, dict) or not {'version', 'vehicles'} <= set(document) or set(document) - {'version', 'vehicles', 'modes', 'convergence'} or
       type(document['version']) is not int or document['version'] != 1 or
       not isinstance(document['vehicles'], dict)):
     raise ValueError('Invalid preference document')
@@ -70,6 +70,19 @@ def _decode(raw):
       mode_count += 1
   if mode_count > 64:
     raise ValueError('Too many vehicle learning modes')
+  convergence = document.get('convergence', {})
+  if type(convergence) is not dict:
+    raise ValueError('Invalid convergence preferences')
+  convergence_count = 0
+  for brand, vehicles in convergence.items():
+    if not brand or len(brand) > 64 or type(vehicles) is not dict:
+      raise ValueError('Invalid convergence preference brand')
+    for fingerprint, mode in vehicles.items():
+      if not fingerprint or len(fingerprint) > 256 or mode not in ('standard', 'faster'):
+        raise ValueError('Invalid vehicle convergence preference')
+      convergence_count += 1
+  if convergence_count > 64:
+    raise ValueError('Too many vehicle convergence preferences')
   return document
 
 
@@ -101,12 +114,15 @@ def replace_preference(raw: bytes | None, CP, enabled: bool) -> bytes:
   return encoded
 
 
+def _supported_torque(CP):
+  return (str(getattr(CP, 'steerControlType', '')) == 'torque' and
+          not any(getattr(CP, key, True) for key in ('notCar', 'passive', 'dashcamOnly')))
+
+
 def learning_mode(raw, CP):
   brand, fingerprint = _identity(CP)
   document = _decode(raw)
-  supported = (str(getattr(CP, 'steerControlType', '')) == 'torque' and
-               not any(getattr(CP, key, True) for key in ('notCar', 'passive', 'dashcamOnly')))
-  return document.get('modes', {}).get(brand, {}).get(fingerprint, 'live' if supported else 'parked')
+  return document.get('modes', {}).get(brand, {}).get(fingerprint, 'live' if _supported_torque(CP) else 'parked')
 
 
 def read_learning_mode(params, CP):
@@ -123,6 +139,34 @@ def replace_learning_mode(raw, CP, mode):
   document = _decode(raw)
   # Both choices are explicit: an offroad-only choice must survive the default.
   document.setdefault('modes', {}).setdefault(brand, {})[fingerprint] = mode
+  encoded = json.dumps(document, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+  _decode(encoded)
+  return encoded
+
+
+def convergence_mode(raw, CP):
+  brand, fingerprint = _identity(CP)
+  document = _decode(raw)
+  if not _supported_torque(CP):
+    return 'standard'
+  return document.get('convergence', {}).get(brand, {}).get(fingerprint, 'standard')
+
+
+def read_convergence_mode(params, CP):
+  raw, okay = read_saved(params, KEY, MAX_BYTES)
+  if not okay:
+    raise ValueError('Unreadable convergence preference')
+  return convergence_mode(raw, CP)
+
+
+def replace_convergence_mode(raw, CP, mode):
+  if mode not in ('standard', 'faster'):
+    raise ValueError('Choose standard or faster convergence')
+  if mode == 'faster' and not _supported_torque(CP):
+    raise ValueError('Faster convergence requires a supported torque-actuated vehicle')
+  brand, fingerprint = _identity(CP)
+  document = _decode(raw)
+  document.setdefault('convergence', {}).setdefault(brand, {})[fingerprint] = mode
   encoded = json.dumps(document, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
   _decode(encoded)
   return encoded

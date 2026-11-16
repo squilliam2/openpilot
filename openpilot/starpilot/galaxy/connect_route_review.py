@@ -17,6 +17,10 @@ class ReviewUnavailable(ValueError):
   """Only fixed, user-facing failure messages; never a URL or credential."""
 
 
+class RetryableReview(ReviewUnavailable):
+  """A temporary transfer failure must preserve completed review checkpoints."""
+
+
 def parse_route(value, device):
   if type(value) is not str or not 1 <= len(value) <= 512 or not DEVICE.fullmatch(device or ''):
     raise ReviewUnavailable('Enter a Connect route for this registered comma')

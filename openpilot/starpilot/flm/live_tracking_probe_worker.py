@@ -18,6 +18,7 @@ def _evaluate_data(data, *, now_ns):
   from openpilot.starpilot.flm.live_tracking_probe import probe_endpoint
   from openpilot.starpilot.flm.effect_trace import trace_from_dict
   from openpilot.starpilot.flm.torque_emission_replay import projection
+  from openpilot.starpilot.flm.live_trial_contract import SOURCE_EXPERIMENT_STEP
 
   binding = LiveTrialBinding(**data['binding']).validate()
   factory, objective = factory_from_snapshot(data['replay'])
@@ -64,7 +65,8 @@ def _evaluate_data(data, *, now_ns):
     source=SourceState(**data['source']), now_ns=now_ns, evidence_ns=data['evidence_ns'], queued_ns=data['queued_ns'],
     current_native=False, archived_clock=data.get('archived_clock', False),
     current_vehicle_model_anchor=data['anchor'], replay=replay, group=data['group'], names=data['names'],
-    prefix_controls=tuple(control(row) for row in data['prefix_controls']))
+    prefix_controls=tuple(control(row) for row in data['prefix_controls']),
+    source_experiment_step=data.get('source_experiment_step', SOURCE_EXPERIMENT_STEP))
   return result
 
 

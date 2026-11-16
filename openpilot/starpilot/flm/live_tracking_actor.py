@@ -210,11 +210,17 @@ def _probe_group_coverage(rows, names, *, kind, direction):
 
 
 class LiveTrackingActor:
-  def __init__(self, bootstrap_process=None, *, probe_process=None, source_tracking=False, parked_candidate=None):
+  def __init__(self, bootstrap_process=None, *, probe_process=None, source_tracking=False, parked_candidate=None,
+               route_import=None, convergence='standard', import_observer=None):
     if type(source_tracking) is not bool or source_tracking and bootstrap_process is not None:
       raise ValueError('source tracking has no plant bootstrap process')
     self.source_tracking = source_tracking
     self.parked_candidate = parked_candidate
+    if convergence not in ('standard', 'faster'):
+      raise ValueError('Known convergence preference required')
+    self.route_import, self.convergence, self.import_observer = route_import, convergence, import_observer
+    self.import_notifications = set()
+    self.route_probe_started_ns = 0
     self.process = bootstrap_process
     from openpilot.starpilot.flm.live_tracking_bootstrap_producer import ResponseSnapshotProcess
 
@@ -325,6 +331,8 @@ class LiveTrackingActor:
     accepted = tuple((name, 0.0) for name in NAMES) if accepted_full30 is None else accepted_full30
     self.ingress = LiveTrackingIngress(certificate.binding, certificate, accepted, controller_domain=collector.adapter.command_family)
     self.ingress.optimizer.parked_candidate = self.parked_candidate
+    self.ingress.optimizer.faster_convergence = self.convergence == 'faster'
+    self.ingress.optimizer.import_faster_supported = bool(self.route_import is not None and self.route_import.faster_evidence_supported)
     self.certificate = certificate
     collector.adapter.replay.source_controller_revision = collector.adapter.controller_revision
     self.ingress.replay = collector.adapter.replay
@@ -498,6 +506,21 @@ class LiveTrackingActor:
       # an unexcited first group starve all other coordinates. PID's four
       # unmeasurable friction hooks remain excluded, never reported as measured.
       group, names = 'all30', tuple(name for name in NAMES if name not in unsupported)
+      from openpilot.starpilot.flm.live_trial_contract import SOURCE_EXPERIMENT_STEP
+      source_experiment_step = SOURCE_EXPERIMENT_STEP
+      hint = optimizer._parked_preference()
+      faster = (self.convergence == 'faster' and self.route_import is not None and self.route_import.faster_evidence_supported
+                and hint is not None and hint.name in names)
+      if faster and not self.route_probe_started_ns:
+        self.route_probe_started_ns = now_ns
+      selected_hint = optimizer._current_selector(now_ns)
+      recovering_larger = (selected_hint is not None and hint is not None and selected_hint['name'] == hint.name and
+                           selected_hint.get('source_probe_step') == 2 * SOURCE_EXPERIMENT_STEP and
+                           (optimizer.selector_pending or discovery_needs_probes(optimizer.discovery)))
+      if faster and (0 <= now_ns - self.route_probe_started_ns <= 60_000_000_000 or recovering_larger):
+        names = (hint.name,)
+        source_experiment_step = 2 * SOURCE_EXPERIMENT_STEP
+      optimizer.faster_source_probe_enabled = source_experiment_step > SOURCE_EXPERIMENT_STEP
       if not names:
         return
       ep = self.ingress.episodes
@@ -564,7 +587,8 @@ class LiveTrackingActor:
       # recomputes the complete controller/native evidence independently.
       from openpilot.starpilot.flm.live_tracking_probe_process import original_probe_context, prepare_probe_payloads
 
-      expected = original_probe_context(selected, accepted, self.certificate.binding, source, group=group, names=names, now_ns=now_ns)
+      expected = original_probe_context(selected, accepted, self.certificate.binding, source, group=group, names=names, now_ns=now_ns,
+                                         source_experiment_step=source_experiment_step)
 
       def prepare_probe():
         import json
@@ -603,6 +627,7 @@ class LiveTrackingActor:
               current_vehicle_model_anchor=endpoint.vehicle_model_anchor,
               group=group,
               names=names,
+              source_experiment_step=source_experiment_step,
               prefix_controls=original_prefix,
               _payload_only=True,
             )
@@ -1010,3 +1035,28 @@ class LiveTrackingActor:
     ):
       return None
     return offer, self.application, self.certificate
+
+  def observe_import(self, now_ns):
+    """Only current native trial events can advance an imported intent's display."""
+    if self.route_import is None or self.ingress is None or self.import_observer is None:
+      return
+    optimizer = self.ingress.optimizer
+    state = optimizer.offer_state
+    if state is None or state.get('import_source_sha256') != self.route_import.source_sha256:
+      return
+    report = optimizer.report(now_ns)
+    if not report['bindingCurrent']:
+      return
+    event = None
+    if state['phase'] == 'trial':
+      event = 'native_trial_offered'
+    elif report['applicationAcknowledged'] and state.get('accepted'):
+      event = ('confirmed' if state['phase'] == 'confirmed' else
+               'rolled_back' if state.get('import_outcome') == 'rejected' else 'queued')
+    notice = (state['trial_id'], event)
+    if event is not None and notice not in self.import_notifications:
+      try:
+        if self.import_observer(self.route_import.intent_id, event):
+          self.import_notifications.add(notice)
+      except (OSError, ValueError):
+        pass  # Import diagnostics cannot interrupt current learning.

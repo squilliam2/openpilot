@@ -105,6 +105,8 @@ class HookSensitivity:
   plus_native_separated: int | None = None
   minus_max_step_physical_rms: float | None = None
   plus_max_step_physical_rms: float | None = None
+  minus_probed_step: float | None = None
+  plus_probed_step: float | None = None
 
   def native_effect(self, step: float) -> tuple[int, float]:
     if step == 0:
@@ -140,6 +142,12 @@ class HookSensitivity:
       or any(count == 0 and effect != 0 for count, effect in zip(directional[:2], directional[2:], strict=True))
     ):
       raise ValueError('complete finite directional native probe support required')
+    widths = (self.minus_probed_step, self.plus_probed_step)
+    if any(width is not None for width in widths) and any(
+      type(width) not in (int, float) or not math.isfinite(cast(float, width)) or not 0 <= cast(float, width) <= MAX_STEP + 1e-12
+      for width in widths
+    ):
+      raise ValueError('Complete actual directional probe widths required')
     return self
 
 
@@ -403,6 +411,8 @@ class TrialState(TypedDict):
   published: NotRequired[bool]
   prior_accepted: NotRequired[TrialState | None]
   source_rechecked_before: NotRequired[tuple[TrackingEpisode, ...]]
+  import_source_sha256: NotRequired[str]
+  import_outcome: NotRequired[Literal['rejected', 'interrupted']]
 
 
 @dataclass
@@ -427,6 +437,8 @@ class DiscoveryState(TypedDict):
   expires_ns: int
   recovery: bool
   minimum_episodes: NotRequired[int]
+  import_source_sha256: NotRequired[str]
+  source_probe_step: NotRequired[float]
 
 
 class SelectorHint(TypedDict):
@@ -443,6 +455,8 @@ class SelectorHint(TypedDict):
   source_episode_ids: tuple[str, ...]
   quota: int
   minimum_episodes: NotRequired[int]
+  import_source_sha256: NotRequired[str]
+  source_probe_step: NotRequired[float]
 
 
 TrialPlan = tuple[int, float, float]
@@ -525,6 +539,9 @@ class LiveTrackingOptimizer:
     self.model_status = 'unavailable'
     self.parked_candidate = None
     self.parked_probe_started_ns = 0
+    self.faster_convergence = False
+    self.import_faster_supported = False
+    self.faster_source_probe_enabled = False
 
   def _hash(self, values: dict[str, float] | tuple[tuple[str, float], ...]) -> str:
     return full_profile_sha256(self.binding.baseline_revision, values)
@@ -680,6 +697,7 @@ class LiveTrackingOptimizer:
         self.offer_state = state.get('prior_accepted')
       else:
         state['phase'], state['target'] = 'rollback', dict(state['baseline'])
+        state['import_outcome'] = 'interrupted'
         state.pop('source_rechecked_before', None)
         self.offer_state = state
     self.status, self.reason = 'paused', reason
@@ -726,7 +744,8 @@ class LiveTrackingOptimizer:
     candidate = self.parked_candidate
     return candidate if type(candidate) is ParkedCandidate and candidate.matches(self.binding, self.domain, self.accepted) else None
 
-  def _fresh_selected_effect(self, rows: Sequence[TrackingEpisode], name: str, target: dict[str, float]) -> float | None:
+  def _fresh_selected_effect(self, rows: Sequence[TrackingEpisode], name: str, target: dict[str, float],
+                            *, source_probe_step: float = SOURCE_EXPERIMENT_STEP) -> float | None:
     effects = []
     for row in rows:
       feature = next((item for item in row.sensitivity if item.name == name), None)
@@ -741,6 +760,14 @@ class LiveTrackingOptimizer:
         or _score_scale(row) <= 0
       ):
         return None
+      if self.rmse is None:
+        low, high = coordinate_bounds(name)
+        widths = (min(source_probe_step, self.accepted[name] - low), min(source_probe_step, high - self.accepted[name]))
+        actual = (feature.minus_probed_step, feature.plus_probed_step)
+        legacy_standard = actual == (None, None) and source_probe_step == SOURCE_EXPERIMENT_STEP
+        if not legacy_standard and not all(width is not None and abs(width - expected) <= 1e-12
+                                           for width, expected in zip(actual, widths, strict=True)):
+          return None
       # No error/error_feature_sum/sign is inspected: the earlier coordinate
       # and bounded direction were fixed before these observations existed.
       delta = target[name] - self.accepted[name]
@@ -819,7 +846,8 @@ class LiveTrackingOptimizer:
     low, high = coordinate_bounds(hint['name'])
     target = dict(self.accepted)
     target[hint['name']] = min(high, max(low, target[hint['name']] + hint['delta']))
-    expected = self._fresh_selected_effect((episode,), hint['name'], target)
+    expected = self._fresh_selected_effect((episode,), hint['name'], target,
+                                           source_probe_step=hint.get('source_probe_step', SOURCE_EXPERIMENT_STEP))
     if expected is None or expected <= 0.0001:
       self.status, self.reason = 'collecting', 'fresh_selected_native_probe_required'
       return self.rmse is not None
@@ -843,6 +871,10 @@ class LiveTrackingOptimizer:
       'recovery': True,
       'minimum_episodes': hint.get('minimum_episodes', _required(episode.kind)),
     }
+    if 'import_source_sha256' in hint:
+      self.discovery['import_source_sha256'] = hint['import_source_sha256']
+    if 'source_probe_step' in hint:
+      self.discovery['source_probe_step'] = hint['source_probe_step']
     self.selector_pending = False
     self.status, self.reason = 'collecting', 'uncensored_independent_comparison_baseline_required'
     return True
@@ -948,7 +980,8 @@ class LiveTrackingOptimizer:
           self.comparison.clear()
           expected = discovery['expected']
           if discovery['recovery']:
-            fresh_effect = self._fresh_selected_effect(rows, discovery['name'], discovery['target'])
+            fresh_effect = self._fresh_selected_effect(rows, discovery['name'], discovery['target'],
+                                                        source_probe_step=discovery.get('source_probe_step', SOURCE_EXPERIMENT_STEP))
             if fresh_effect is None:
               self.selector_pending = self.selector_hint is not None
               self.selector_after_ns = rows[-1].end_ns
@@ -960,7 +993,8 @@ class LiveTrackingOptimizer:
             self._discard_selector()
             self.status, self.reason = 'not_identifiable', 'independent_baseline_trial_power_insufficient'
             return False
-          return self._launch(discovery['group'], discovery['name'], discovery['target'], rows, plan, now_ns)
+          return self._launch(discovery['group'], discovery['name'], discovery['target'], rows, plan, now_ns,
+                              import_source_sha256=discovery.get('import_source_sha256'))
         self.status, self.reason = 'collecting', 'uncensored_independent_comparison_baseline_required'
         return False
       self.baseline.append(episode)
@@ -1189,6 +1223,20 @@ class LiveTrackingOptimizer:
             and feature.native_endpoints >= 4
             and feature.native_separated / feature.native_endpoints >= 0.09
           )
+          parked_hint = self._parked_preference()
+          faster_coordinate = (self.faster_convergence and self.import_faster_supported and self.faster_source_probe_enabled and
+                               parked_hint is not None and parked_hint.name == name)
+          if self.rmse is None:
+            requested = SOURCE_EXPERIMENT_STEP * (2 if faster_coordinate else 1)
+            low, high = coordinate_bounds(name)
+            expected_widths = (min(requested, self.accepted[name] - low), min(requested, high - self.accepted[name]))
+            def same_probe(row, name=name, faster_coordinate=faster_coordinate, expected_widths=expected_widths):
+              feature = features[id(row)][name]
+              actual = (feature.minus_probed_step, feature.plus_probed_step)
+              return (not faster_coordinate if actual == (None, None) else
+                      all(width is not None and abs(width - expected) <= 1e-12
+                          for width, expected in zip(actual, expected_widths, strict=True)))
+            rows = tuple(row for row in rows if same_probe(row))
           rows, minimum = _discovery_support(rows, episode.kind, self.rmse)
           if not rows:
             continue
@@ -1237,7 +1285,14 @@ class LiveTrackingOptimizer:
           # Actual worse/inconclusive directions below remain disqualified;
           # independent baseline, later feedback and slew are unchanged.
           low, high = coordinate_bounds(name)
-          step_limit = SOURCE_EXPERIMENT_STEP if self.rmse is None else min(MAX_STEP, 0.1 * confidence)
+          stronger = (self.faster_convergence and self.import_faster_supported and parked_hint is not None and
+                      parked_hint.name == name and parked_hint.delta * sign > 0)
+          strength = 0.2 if stronger else 0.1
+          faster_source = (self.faster_convergence and self.import_faster_supported and self.faster_source_probe_enabled and
+                           parked_hint is not None and parked_hint.name == name and parked_hint.delta * sign > 0)
+          if self.rmse is None and faster_coordinate and not faster_source:
+            continue  # .02-only native evidence cannot certify the opposite .01 experiment.
+          step_limit = (2 * SOURCE_EXPERIMENT_STEP if faster_source else SOURCE_EXPERIMENT_STEP) if self.rmse is None else min(MAX_STEP, strength * confidence)
           if self.rmse is None and min(high, max(low, self.accepted[name] + sign * step_limit)) == self.accepted[name]:
             sign = -sign
 
@@ -1262,6 +1317,8 @@ class LiveTrackingOptimizer:
                    for row, (separated, _) in zip(rows, directed, strict=True)):
               continue
             alternate = True
+          if faster_source and parked_hint is not None and delta * parked_hint.delta <= 0:
+            continue
           predicted = min(effect for _, effect in directed)
           expected = predicted * abs(delta) / MAX_STEP / max(_score_scale(row) for row in rows)
           if expected <= 0.0001:
@@ -1325,6 +1382,8 @@ class LiveTrackingOptimizer:
       'recovery': False,
       'minimum_episodes': len(rows),
     }
+    if preferred and parked is not None:
+      self.discovery['import_source_sha256'] = parked.source_sha256
     self.selector_hint = {
       'group': group,
       'name': name,
@@ -1340,13 +1399,20 @@ class LiveTrackingOptimizer:
       'quota': len(rows),
       'minimum_episodes': len(rows),
     }
+    if preferred and parked is not None:
+      self.selector_hint['import_source_sha256'] = parked.source_sha256
+    if self.rmse is None:
+      probe_step = SOURCE_EXPERIMENT_STEP * (2 if preferred and self.faster_convergence and self.import_faster_supported and
+                                             self.faster_source_probe_enabled else 1)
+      self.selector_hint['source_probe_step'] = self.discovery['source_probe_step'] = probe_step
     self.selector_pending = False
     self.comparison.clear()
     self.baseline.clear()
     self.status, self.reason = 'collecting', 'uncensored_independent_comparison_baseline_required'
     return False
 
-  def _launch(self, group: str, name: str, target: dict[str, float], rows: tuple[TrackingEpisode, ...], plan: TrialPlan, now_ns: int) -> bool:
+  def _launch(self, group: str, name: str, target: dict[str, float], rows: tuple[TrackingEpisode, ...], plan: TrialPlan, now_ns: int,
+              *, import_source_sha256: str | None = None) -> bool:
     required, critical, alpha = plan
     self.ready_since[group] = now_ns
     self.sequence += 1
@@ -1379,6 +1445,8 @@ class LiveTrackingOptimizer:
       'prior_accepted': prior,
       'look_quotas': looks,
     }
+    if import_source_sha256 is not None:
+      self.offer_state['import_source_sha256'] = import_source_sha256
     if self.rmse is None:
       self.offer_state['demand'] = self._comparison_demand(rows)
     self.last_attempt, self.before, self.future = now_ns, rows, []
@@ -1430,6 +1498,9 @@ class LiveTrackingOptimizer:
         direction = 1 if state['target'][name] > state['baseline'][name] else -1
         self.rejected_directions.append((name, direction, self._hash(state['baseline']), state.get('demand', _demand(self.before[0]))))
     state['phase'], state['target'] = 'rollback', dict(state['baseline'])
+    state['import_outcome'] = ('rejected' if reason in (
+      'independent_future_tracking_not_improved', 'matched_tracking_not_consistently_improved',
+      'trial_tracking_or_oscillation_worse', 'trial_oscillation_batch_worse') else 'interrupted')
     state.pop('source_rechecked_before', None)
     self.offer_state = state
     self._discard_selector()

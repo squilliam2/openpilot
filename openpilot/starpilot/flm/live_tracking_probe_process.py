@@ -4,6 +4,7 @@ from dataclasses import fields
 import hashlib
 
 from openpilot.starpilot.flm.fit_process import FitProcess
+from openpilot.starpilot.flm.live_trial_contract import SOURCE_EXPERIMENT_STEP
 
 VERSION = 'live-probe-numerical-job-v1'
 MAX_PACKED = 3 * 1024 * 1024
@@ -226,6 +227,7 @@ def make_probe_job(
   prefix_controls,
   archived_clock=False,
   _payload_only=False,
+  source_experiment_step=SOURCE_EXPERIMENT_STEP,
 ):
   """Freeze genuine owner evidence, independently of later application authority.
 
@@ -236,10 +238,11 @@ def make_probe_job(
   from openpilot.starpilot.flm.fullrate_collector import AppliedEvidence
   from openpilot.starpilot.flm.live_trial_contract import LiveTrialBinding, full_coordinates
   from openpilot.starpilot.flm.live_tracking_response import witness_to_dict
-  from openpilot.starpilot.flm.live_tracking_probe import _projection_literal
+  from openpilot.starpilot.flm.live_tracking_probe import _projection_literal, source_probe_step
   from openpilot.starpilot.flm.runtime_adapter_registry import SourceState
   from opendbc.car.steering_projection import TorqueProjection
 
+  source_experiment_step = source_probe_step(source_experiment_step)
   if (
     type(_payload_only) is not bool
     or type(archived_clock) is not bool
@@ -276,6 +279,7 @@ def make_probe_job(
     'evidence_ns': evidence_ns,
     'queued_ns': queued_ns,
     'archived_clock': archived_clock,
+    'source_experiment_step': source_experiment_step,
     'anchor': current_vehicle_model_anchor,
     'group': group,
     'names': names,
@@ -325,6 +329,8 @@ def decode_probe_job(job):
       or not 0 < len(row['replay']) <= MAX_PACKED
     ):
       raise ValueError('bounded literal replay bytes required')
+    from openpilot.starpilot.flm.live_tracking_probe import source_probe_step
+    source_probe_step(row.get('source_experiment_step', SOURCE_EXPERIMENT_STEP))
     _validate_primitive(dict(row, replay=None))
   return payload
 
@@ -407,6 +413,7 @@ def _prepared_context(data):
         'accepted_full30': row['accepted_full30'],
         'group': row['group'],
         'names': row['names'],
+        'source_experiment_step': row.get('source_experiment_step', SOURCE_EXPERIMENT_STEP),
         'source': row['source'],
         'anchor': row['anchor'],
         'evidence_ns': row['evidence_ns'],
@@ -428,8 +435,12 @@ def _context_digest(context):
   return _digest(raw)
 
 
-def original_probe_context(selected, accepted, binding, source, *, group, names, now_ns):
+def original_probe_context(selected, accepted, binding, source, *, group, names, now_ns,
+                           source_experiment_step=SOURCE_EXPERIMENT_STEP):
   from dataclasses import asdict
+  from openpilot.starpilot.flm.live_tracking_probe import source_probe_step
+
+  source_experiment_step = source_probe_step(source_experiment_step)
 
   rows = tuple(
     {
@@ -439,6 +450,7 @@ def original_probe_context(selected, accepted, binding, source, *, group, names,
       'accepted_full30': accepted,
       'group': group,
       'names': names,
+      'source_experiment_step': source_experiment_step,
       'source': asdict(source),
       'anchor': control.vehicle_model_anchor,
       'evidence_ns': now_ns,
@@ -599,6 +611,21 @@ class ProbeProcess(FitProcess):
       rows = tuple(ProbeCoordinate(**row) for row in output)
       if tuple(row.name for row in rows) != data['names']:
         raise ValueError('owned child coordinate group differs')
+      if 'source_experiment_step' in data:
+        from openpilot.starpilot.flm.canonical_surface_adapter import coordinate_bounds
+        from openpilot.starpilot.flm.live_trial_contract import MAX_STEP
+        from openpilot.starpilot.flm.live_tracking_response import SOURCE_VERSION
+        from openpilot.starpilot.flm.live_tracking_probe import source_probe_step
+
+        source_only = data.get('witness', {}).get('certificate', {}).get('version') == SOURCE_VERSION
+        step = source_probe_step(data['source_experiment_step']) if source_only else MAX_STEP
+        prior = dict(data['accepted_full30'])
+        for row in rows:
+          lower, upper = coordinate_bounds(row.name)
+          expected = prior[row.name]
+          if (row.baseline_coordinate != expected or row.minus_coordinate != max(lower, expected - step) or
+              row.plus_coordinate != min(upper, expected + step)):
+            raise ValueError('owned child probe amplitude differs from the requested native replay')
       result = ProbeResult(
         binding,
         data['control']['control_ns'],

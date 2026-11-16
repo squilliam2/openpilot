@@ -1074,6 +1074,9 @@ def run(
           message.logMonoTime = publication_now
         write_source_receipt(message, source)
         pm.send('autoSteeringLearning', message)
+        import_observer = getattr(live_actor, 'observe_import', None)
+        if callable(import_observer):
+          import_observer(now)
         if reporter is not None:
           cached = cached_reports.get(active_key)
           reporter.publish(now_ns=now, message=message, collector=collector, source=source, objective=active_key,
@@ -1201,6 +1204,28 @@ def main(*, stopped=None):
     return production_adapter_for_evidence(cp, evidence, key, source=source_reader(time.monotonic_ns()))
 
   persistence = PersistenceModule(params, current_sources)
+  confirmed = load_confirmed_history(params)
+  imported = None
+  convergence = 'standard'
+  try:
+    from openpilot.starpilot.flm.offroad_runtime import current_scope
+    from openpilot.starpilot.flm.canonical_surface_adapter import NAMES
+    from openpilot.starpilot.flm.live_parked_finish import ParkedCandidate
+    from openpilot.starpilot.flm.route_tuning_import import load_pending
+    from openpilot.starpilot.lateral.learning_preferences import read_convergence_mode
+    scope = current_scope(CP, params)
+    previous = tuple((name, 0.) for name in NAMES)
+    for prior in confirmed:
+      if ParkedCandidate(scope, previous, NAMES[0], .005, '0' * 64).matches(prior.binding, scope.controller_domain, dict(previous)):
+        previous = prior.target
+        break
+    imported = load_pending(params, CP, scope, previous, 'live')
+    convergence = read_convergence_mode(params, CP)
+  except (OSError, ValueError, TypeError, AttributeError):
+    pass  # A cloud hint is optional; ordinary upstream learning remains available.
+  def import_event(intent_id, state):
+    from openpilot.starpilot.flm.route_tuning_import import mark_state
+    return mark_state(params, intent_id, state, runtime_event=True)
   import gc
   gc_was_enabled = gc.isenabled()
   if gc_was_enabled:
@@ -1225,9 +1250,11 @@ def main(*, stopped=None):
       adapter_for_ford,
       reporter=reporter,
       publication_source_reader=publication_source_reader,
-      live_actor=LiveTrackingActor(probe_process=ProbeProcess(), source_tracking=True, parked_candidate=load_candidate(params)),
+      live_actor=LiveTrackingActor(probe_process=ProbeProcess(), source_tracking=True,
+        parked_candidate=imported.as_parked_candidate() if imported is not None else load_candidate(params),
+        route_import=imported, convergence=convergence, import_observer=import_event),
       live_persistence=LiveTrialPersistence(params),
-      confirmed_history=load_confirmed_history(params),
+      confirmed_history=confirmed,
       stopped=stopped,
     )
   finally:
