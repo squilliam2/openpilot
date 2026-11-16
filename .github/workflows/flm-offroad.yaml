@@ -84,10 +84,13 @@ jobs:
             openpilot/starpilot/flm/tests/test_offroad_long_partial.py \
             openpilot/starpilot/flm/tests/test_live_mode_selection.py \
             openpilot/starpilot/flm/tests/test_live_parked_finish.py \
+            openpilot/starpilot/flm/tests/test_power_loss_recovery.py \
             openpilot/starpilot/flm/tests/test_live_trial_global_runtime.py \
             openpilot/starpilot/flm/tests/test_control_wire_fields.py \
             openpilot/starpilot/flm/tests/test_steering_compatibility.py \
             openpilot/starpilot/galaxy/tests/test_drive_history.py \
+            openpilot/starpilot/galaxy/tests/test_drive_analysis.py \
+            openpilot/starpilot/galaxy/tests/test_drive_stats.py \
             --json-output ci-results/flm-offroad.json
           .venv/bin/python -m pytest -q --import-mode=importlib \
             openpilot/starpilot/flm/tests/test_upstream_producer_transport.py \

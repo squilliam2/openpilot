@@ -119,8 +119,13 @@ class StatusReport:
       details['Drive analysis is partial'] = True
       details['Partial drive segments'] = value['partial_segments']
       details['Omitted recorded segments'] = value['omitted_segments'][:16]
+      details['Original route completion proven'] = False
+      if 'recorded_cutoff_ns' in value:
+        details['Last intact recorded time (monotonic ns)'] = value['recorded_cutoff_ns']
     for key, title in (('source_sha256', 'Original completed route hash'), ('assessment_sha256', 'Offroad assessment hash')):
       if key in value:
+        if key == 'source_sha256' and value.get('partial_drive'):
+          title = 'Original recorded section hash'
         details[title] = value[key]
     from openpilot.starpilot.flm.canonical_surface_adapter import NAMES
     from openpilot.starpilot.flm.offroad_surface import CURVE_NAMES, route_values

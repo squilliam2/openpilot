@@ -15,7 +15,7 @@ import threading
 import time
 
 from openpilot.starpilot.galaxy.drive_history import DriveHistory, MAX_ROOT_ENTRIES, MAX_STATS_SEGMENTS_PER_ROUTE
-from openpilot.starpilot.galaxy.drive_analysis import ANALYSIS_VERSION
+from openpilot.starpilot.galaxy.drive_analysis import ANALYSIS_VERSION, recording_inventory
 from openpilot.starpilot.storage import galaxy_storage_root
 
 SOURCE_LIMITATIONS = frozenset({'Route has no observed duration', 'End of route was not recorded',
@@ -110,14 +110,27 @@ def _route_signature(root: Path, route: dict) -> tuple[str, dict]:
       except OSError:
         pass
     parts.append((segment.get('number'), name, files))
-  encoded = json.dumps(parts, sort_keys=True, separators=(',', ':')).encode()
+  # History intentionally omits locked/empty directories. Keep those sources in
+  # the signature so their repair, deletion, or newly acquired lock retries the
+  # same route and replaces its partial coverage.
+  inventory = recording_inventory(root, route.get('routeId', ''), lambda: True)
+  encoded = json.dumps((parts, inventory), sort_keys=True, separators=(',', ':')).encode()
   source = hashlib.sha256(encoded + json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
   return source, manifest
 
 
-def _only_deleted_sources(previous: dict, current: dict) -> bool:
+def _only_deleted_sources(previous: dict, current: dict, *, root: Path, route_id: str) -> bool:
   old = previous.get('sourceManifest')
-  return isinstance(old, dict) and all(old.get(key) == revision for key, revision in current.items())
+  if not isinstance(old, dict) or any(old.get(key) != revision for key, revision in current.items()):
+    return False
+  try:
+    inventory = recording_inventory(root, route_id, lambda: True)
+  except Exception:
+    return False
+  present = {f'{name}/{source[0]}' for name, record in inventory.items() for source in record[2]}
+  # A source hidden from DriveHistory by a new lock is still present. It must
+  # be reanalyzed, rather than mistaken for logger cleanup of completed data.
+  return not any(key in present for key in old.keys() - current.keys())
 
 
 def _personal_records(drives: list[dict], zone: tzinfo) -> list[dict]:
@@ -297,7 +310,14 @@ class DriveStatsOwner:
         route_id = route.get('routeId')
         if type(route_id) is not str or len(route_id) > 180:
           continue
-        signature, manifest = _route_signature(self.root, route)
+        try:
+          signature, manifest = _route_signature(self.root, route)
+        except Exception:
+          # An unreadable/racy route cannot prevent analysis of other drives.
+          # Retry its inventory on the next scan; no unverifiable stats publish.
+          with self._lock:
+            self._scan_incomplete = True
+          continue
         with self._lock:
           existing = self._records.get(route_id)
           failed = self._failures.get(route_id)
@@ -305,7 +325,7 @@ class DriveStatsOwner:
               existing.get('analysisVersion', 0) >= ANALYSIS_VERSION):
             continue
           if (existing and existing.get('complete') and manifest != existing.get('sourceManifest') and
-              _only_deleted_sources(existing, manifest)):
+              _only_deleted_sources(existing, manifest, root=self.root, route_id=route_id)):
             prior_signature = existing['sourceSignature']
             existing['sourceSignature'] = signature
             try:

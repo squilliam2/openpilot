@@ -42,6 +42,23 @@ def analyzed(root, selected, permitted):
 
 
 class DriveStatsTest(unittest.TestCase):
+  def test_unreadable_source_inventory_does_not_block_other_routes(self):
+    self.history.routes.append(route('other'))
+    owner = self.owner(analyzer=mock.Mock(wraps=analyzed))
+    signature = drive_stats._route_signature
+
+    def inspect(root, selected):
+      if selected['routeId'] == 'abc':
+        raise OSError('unreadable recording directory')
+      return signature(root, selected)
+
+    with mock.patch.object(drive_stats, '_route_signature', side_effect=inspect):
+      owner._run()
+    self.assertEqual(owner.snapshot()['totals']['drives'], 1)
+    self.assertEqual(owner.snapshot()['lastDrive']['routeId'], 'other')
+    self.assertTrue(owner._scan_incomplete)
+    owner.analyzer.assert_called_once()
+
   def test_partial_stats_survive_restart_and_refresh_without_double_counting(self):
     partial = dict(analyzed(self.root, route('abc'), lambda: True), complete=False, partial=True,
                    reason='Recorded portion only; final segment unreadable')

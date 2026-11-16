@@ -8,7 +8,7 @@ import time
 
 from openpilot.starpilot.flm.log_decode import decode_full_rlog_segment, LogDecodeError, LogDecodeCancelled
 from openpilot.starpilot.flm.offroad_route import (
-  LOCAL_ID, MAX_SEGMENTS, MAX_TOTAL_BYTES, MAX_ANALYSIS_SECONDS, RETAIN, PartialRouteReceipt,
+  LOCAL_ID, MAX_TOTAL_BYTES, MAX_ANALYSIS_SECONDS, RETAIN, PartialRouteReceipt,
   RouteInputError, RouteInputCancelled, route_reader, source_revisions,
 )
 from openpilot.starpilot.galaxy.drive_analysis import _route_names, _closed_source, _Incomplete
@@ -49,21 +49,24 @@ def partial_inventory(root, route_id, *, permitted):
 
 
 @route_reader
-def walk_partial_route(root, route, *, permitted, consume):
+def walk_partial_route(root, route, *, permitted, consume, selection_limit=MAX_LONG_REVIEW_SEGMENTS):
   from openpilot.starpilot.flm.runtime_adapter_registry import car_params_digest
   from openpilot.starpilot.flm.offroad_evidence import torque_vehicle
 
   route_id = route['routeId']
+  if type(selection_limit) is not int or not 2 <= selection_limit <= MAX_LONG_REVIEW_SEGMENTS:
+    raise ValueError('Bounded partial-drive segment selection required')
   if partial_inventory(root, route_id, permitted=permitted) != route:
     raise ValueError('Partial inventory changed')
   before = source_revisions(root, route)
   started = time.monotonic()
   receipts, decoded, omitted, contexts, seen = [], [], [], set(), set()
   cp_hash, first, last, wall, total = None, None, 0, 0, 0
+  ended = False
   available = [row['number'] for row in route['segments'] if not row['unavailable']]
   selected = set(available)
-  if len(route['segments']) > MAX_SEGMENTS and len(available) > MAX_LONG_REVIEW_SEGMENTS:
-    selected = {available[i * (len(available) - 1) // (MAX_LONG_REVIEW_SEGMENTS - 1)] for i in range(MAX_LONG_REVIEW_SEGMENTS)}
+  if len(available) > selection_limit:
+    selected = {available[i * (len(available) - 1) // (selection_limit - 1)] for i in range(selection_limit)}
   byte_bound = False
 
   def allowed():
@@ -116,6 +119,7 @@ def walk_partial_route(root, route, *, permitted, consume):
         if not current() or not allowed():
           raise RouteInputCancelled('Partial source changed or review cancelled')
         cp_hash = cp
+        ended |= 'endOfRoute' in endings
         consume(number, events)
         for event in events:
           if event.which() == 'starpilotLateralState' and event.valid and event.starpilotLateralState.learningEvidence.version == 1:
@@ -129,11 +133,16 @@ def walk_partial_route(root, route, *, permitted, consume):
       raise
     except (LogDecodeError, _Incomplete, OSError) as error:
       omitted.append((number, str(error)[:160]))
-  if not decoded or cp_hash is None or first is None or not omitted:
-    raise ValueError('No independently closed partial segments, or complete input must be retried')
+  if not decoded or cp_hash is None or first is None:
+    raise ValueError('No independently closed recorded sections are available')
+  if not omitted and ended:
+    raise ValueError('Complete input must be retried through full analysis')
   if (source_revisions(root, route) != before or partial_inventory(root, route_id, permitted=allowed) != route or not allowed()):
     raise RouteInputCancelled('Partial recording changed before review completed')
-  digest = hashlib.sha256(json.dumps((route_id, receipts, omitted), separators=(',', ':')).encode()).hexdigest()
+  # N/N independently closed files can still be an interrupted trip: power
+  # may disappear between rotation and creating its next directory. Preserve
+  # that as PARTIAL without inventing a segment or an end-of-route marker.
+  digest = hashlib.sha256(json.dumps(('closed-sections-v2', route_id, receipts, omitted, ended), separators=(',', ':')).encode()).hexdigest()
   return PartialRouteReceipt(route_id, digest, tuple(receipts), cp_hash, first, last, 0, tuple(sorted(contexts)), tuple(decoded), tuple(omitted), wall)
 
 

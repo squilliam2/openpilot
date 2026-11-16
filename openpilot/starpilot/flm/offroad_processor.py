@@ -211,6 +211,7 @@ class RecordedInputs:
   counts: dict
   quality_stops: list
   observed_sources: dict = field(default_factory=dict)
+  segment_bounds: dict = field(default_factory=dict)
 
 
 def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segments=False):
@@ -242,6 +243,7 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
   }
   quality_stops = []
   driver_inputs = DriverExclusions()
+  segment_bounds = {}
 
   def metadata_for(control, domain):
     from openpilot.starpilot.flm.route_recording import configuration_values
@@ -280,6 +282,10 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
       if index % 128 == 0 and not permitted():
         raise ValueError('Parked analysis cancelled')
       kind = event.which()
+      stamp = int(getattr(event, 'logMonoTime', 0))
+      if kind not in ('initData', 'carParams', 'sentinel') and stamp > 0:
+        first, last = segment_bounds.get(segment, (stamp, stamp))
+        segment_bounds[segment] = (min(first, stamp), max(last, stamp))
       if kind == 'carState':
         cs = event.carState
         if cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed:
@@ -445,7 +451,8 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
   counts['driver_input_excluded_windows'] = len(removed)
   counts['original_segments_reviewed'] = len(getattr(receipt, 'decoded_segments', receipt.segments))
   counts['original_segments_available'] = len(receipt.segments)
-  return RecordedInputs(receipt, state, windows, stable_windows, baseline_tracking, bookends, raw_windows, context_metadata, counts, quality_stops, observed)
+  return RecordedInputs(receipt, state, windows, stable_windows, baseline_tracking, bookends, raw_windows, context_metadata, counts,
+                        quality_stops, observed, segment_bounds)
 
 
 def collect_latest_steering_inputs(params, root, *, permitted, selected_route=None):

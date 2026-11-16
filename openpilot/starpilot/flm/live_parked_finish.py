@@ -18,7 +18,7 @@ from openpilot.starpilot.flm.canonical_surface_adapter import NAMES, GROUPS
 from openpilot.starpilot.flm.offroad_cache import AssessmentCache, directory_for_params
 from openpilot.starpilot.flm.offroad_store import RouteScope
 
-VERSION = 1
+VERSION = 2
 MAX_BYTES = 32768
 
 
@@ -118,6 +118,32 @@ def fit_candidate(inputs, scope, previous, *, permitted, counts=None):
   return None
 
 
+def trim_unobserved_edges(inputs):
+  """Missing adjacent logs cannot certify absence of nearby driver input."""
+  from openpilot.starpilot.flm.driver_exclusions import BEFORE_NS, AFTER_NS
+  bounds = inputs.segment_bounds
+  removed = set()
+  for table in (inputs.windows, inputs.stable_windows, inputs.baseline_tracking, inputs.raw_windows):
+    for context in tuple(table):
+      kept = []
+      for window in table[context]:
+        number = window.points[0].segment
+        first, last = bounds[number]
+        previous, following = bounds.get(number - 1), bounds.get(number + 1)
+        observed_before = previous is not None and abs(first - previous[1]) <= 50_000_000
+        observed_after = following is not None and abs(following[0] - last) <= 50_000_000
+        if ((not observed_before and window.points[0].mono_ns < first + AFTER_NS) or
+            (not observed_after and window.points[-1].mono_ns > last - BEFORE_NS)):
+          removed.add(window.identity)
+        else:
+          kept.append(window)
+      if kept:
+        table[context] = kept
+      else:
+        del table[context]
+  inputs.counts['unobserved_boundary_excluded_windows'] = len(removed)
+
+
 class LiveParkedFinisher:
   def __init__(self, params, root, cache=None, *, permitted, on_analysis=None):
     self.params, self.root = params, Path(root)
@@ -126,7 +152,9 @@ class LiveParkedFinisher:
     here = Path(__file__).parent
     self.implementation = hashlib.sha256(b''.join((here / name).read_bytes() for name in (
       'live_parked_finish.py', 'offroad_processor.py', 'offroad_evidence.py', 'driver_exclusions.py',
-      'offroad_analysis.py', 'offroad_tracking.py',
+      'offroad_analysis.py', 'offroad_tracking.py', 'offroad_partial.py', 'offroad_route.py',
+      'offroad_prior_inputs.py', 'log_decode.py', 'offroad_control_metadata.py',
+      '../galaxy/drive_analysis.py', '../galaxy/drive_history.py',
     ))).hexdigest()
 
   def run_once(self):
@@ -172,7 +200,7 @@ class LiveParkedFinisher:
 
   def _run_once(self):
     from openpilot.starpilot.flm.offroad_processor import collect_latest_steering_inputs, collect_route_inputs
-    from openpilot.starpilot.flm.offroad_route import latest_route, source_revisions, logger_marker
+    from openpilot.starpilot.flm.offroad_route import latest_route, source_revisions, logger_marker, PartialRouteReceipt, RouteInputCancelled
     from openpilot.starpilot.flm.offroad_runtime import current_scope
     from openpilot.starpilot.flm.live_trial_store import load_confirmed_history, KEY as LIVE_KEY, MAX_BYTES as LIVE_BYTES
     from openpilot.starpilot.flm.learning_mode import selected_mode
@@ -182,7 +210,9 @@ class LiveParkedFinisher:
 
     if not self.permitted() or selected_mode(self.params) != 'live':
       raise ValueError('Live-drive finishing waits until parked with live mode selected')
-    route = latest_route(self.params, self.root, permitted=self.permitted)
+    # Retain the exact logger-owned identity even when an unavailable tail
+    # removes the complete route from inventory. Never select by file mtime.
+    route = latest_route(self.params, self.root, permitted=self.permitted, inventory_only=True)
     original_marker = logger_marker(self.params)
     revisions = source_revisions(self.root, route)
     cp_raw, readable = read_saved(self.params, 'CarParamsPersistent', 1024 * 1024)
@@ -213,14 +243,30 @@ class LiveParkedFinisher:
     started = time.monotonic()
     def allowed():
       return self.permitted() and time.monotonic() - started <= 300
+    recovery_inventory = None
+    def recover():
+      nonlocal recovery_inventory
+      from openpilot.starpilot.flm.offroad_partial import partial_inventory, walk_partial_route
+      recovery_inventory = partial_inventory(self.root, route['routeId'], permitted=allowed)
+      def walk(root, selected, *, permitted, consume):
+        return walk_partial_route(root, selected, permitted=permitted, consume=consume, selection_limit=14)
+      result = collect_route_inputs(self.root, recovery_inventory, permitted=allowed, walker=walk, isolate_segments=True)
+      trim_unobserved_edges(result)
+      return result
     try:
-      if len(route['segments']) > 30:
-        from openpilot.starpilot.flm.offroad_prior_inputs import _selected_sources
-        def walk(root, route, *, permitted, consume):
-          return _selected_sources(root, route, permitted=permitted, consume=consume, cp_sha256=scope.cp_sha256)
-        inputs = collect_route_inputs(self.root, route, permitted=allowed, walker=walk, isolate_segments=True)
+      if route.get('selection_error') or len(route['segments']) > 30:
+        inputs = recover()
       else:
-        _, inputs = collect_latest_steering_inputs(self.params, self.root, permitted=allowed, selected_route=route)
+        try:
+          _, inputs = collect_latest_steering_inputs(self.params, self.root, permitted=allowed, selected_route=route)
+        except RouteInputCancelled:
+          raise
+        except (OSError, ValueError):
+          if not allowed():
+            raise
+          inputs = recover()
+    except RouteInputCancelled:
+      raise
     except (OSError, ValueError) as error:
       if not allowed() or not unchanged():
         raise ValueError('Parked finishing interrupted; original recording will be retried') from error
@@ -229,6 +275,10 @@ class LiveParkedFinisher:
       return result  # Repair/closure/settings/code changes invalidate this memo.
     if current_scope(inputs.state['cp'], self.params) != scope:
       raise ValueError('Recorded drive belongs to a different current vehicle/settings scope')
+    if recovery_inventory is not None:
+      from openpilot.starpilot.flm.offroad_partial import partial_inventory
+      if partial_inventory(self.root, route['routeId'], permitted=allowed) != recovery_inventory:
+        raise ValueError('Recovered recording changed during analysis')
     previous = tuple((n, 0.) for n in NAMES)
     for prior in load_confirmed_history(self.params):
       if ParkedCandidate(scope, previous, NAMES[0], .005, inputs.receipt.source_sha256).matches(
@@ -258,6 +308,11 @@ class LiveParkedFinisher:
               'source_sha256': inputs.receipt.source_sha256,
               'next_drive_candidate': None if candidate is None else {'parameter': candidate.name, 'delta': candidate.delta},
               'requires_fresh_live_qualification': True}
+    if type(inputs.receipt) is PartialRouteReceipt:
+      result.update(partial_drive=True,
+                    partial_segments=[len(inputs.receipt.decoded_segments), len(inputs.receipt.segments)],
+                    omitted_segments=[list(row) for row in inputs.receipt.omitted_segments],
+                    recorded_cutoff_ns=inputs.receipt.original_end_ns, route_completion_proven=False)
     if not allowed() or not unchanged():
       raise ValueError('Parked finishing was interrupted; no accepted tune changed')
     self.cache._write('checkpoint.json', json.dumps({'version': VERSION, 'signature': signature, 'result': result}, allow_nan=False).encode(),

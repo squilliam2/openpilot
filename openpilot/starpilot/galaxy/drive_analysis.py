@@ -25,7 +25,7 @@ MAX_ANALYSIS_SECONDS = 30.0
 MAX_PAIR_SECONDS = 1.0
 MAX_SPEED_MPS = 70.0
 MAX_ROUTE_COMPRESSED_BYTES = MAX_STATS_SEGMENTS_PER_ROUTE * MAX_COMPRESSED_BYTES
-ANALYSIS_VERSION = 6
+ANALYSIS_VERSION = 7
 MAX_MODEL_METADATA_SECONDS = 4.0
 DISTRACTED_EVENT = 'driverDistracted2'
 UNRESPONSIVE_EVENT = 'driverUnresponsive3'
@@ -139,7 +139,66 @@ def _route_names(root: Path, route_id: str, allowed: Callable[[], bool]) -> set[
   return names
 
 
-def _selected(route: dict) -> tuple[str, list[str]]:
+def recording_inventory(root: Path, route_id: str, allowed: Callable[[], bool]) -> dict[str, tuple]:
+  """Snapshot source and lock metadata, including tails omitted by DriveHistory.
+
+  Open directories without following links. An abandoned logger lock remains
+  evidence of unavailable recording; this reader never removes or overrides it.
+  """
+  inventory = {}
+  try:
+    root_fd = os.open(root, DIR_FLAGS)
+    try:
+      root_info = os.fstat(root_fd)
+      with os.scandir(root_fd) as entries:
+        for count, entry in enumerate(entries, 1):
+          if not allowed():
+            raise _Incomplete('Analysis cancelled')
+          if count > MAX_ROOT_ENTRIES:
+            raise _Incomplete('Route inventory is incomplete')
+          matched = SEGMENT_NAME.fullmatch(entry.name)
+          if matched is None or matched.group('route').replace('_', '|') != route_id:
+            continue
+          segment_fd = os.open(entry.name, DIR_FLAGS, dir_fd=root_fd)
+          try:
+            segment_info = os.fstat(segment_fd)
+            sources = []
+            with os.scandir(segment_fd) as files:
+              for file_count, source in enumerate(files, 1):
+                if not allowed():
+                  raise _Incomplete('Analysis cancelled')
+                if file_count > MAX_SEGMENT_ENTRIES:
+                  raise _Incomplete('Route inventory is incomplete')
+                if source.name in LOGS or source.name.endswith('.lock'):
+                  info = source.stat(follow_symlinks=False)
+                  sources.append((source.name, info.st_mode, _revision(info)))
+            current = os.stat(entry.name, dir_fd=root_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (segment_info.st_dev, segment_info.st_ino):
+              raise _Incomplete('Route source changed')
+            inventory[entry.name] = (int(matched.group('number')), (segment_info.st_dev, segment_info.st_ino), tuple(sorted(sources)))
+          finally:
+            os.close(segment_fd)
+      current = os.stat(root, follow_symlinks=False)
+      if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (root_info.st_dev, root_info.st_ino):
+        raise _Incomplete('Route source changed')
+    finally:
+      os.close(root_fd)
+  except OSError as error:
+    raise _Incomplete('Route directory is unavailable') from error
+  return inventory
+
+
+def _unavailable_tail(record: tuple, *, prefer_rlog: bool) -> bool:
+  sources = record[2]
+  if any(name.endswith('.lock') for name, _, _ in sources):
+    return True
+  logs = [source for source in sources if source[0] in LOGS]
+  preferred = [source for source in logs if source[0].startswith('rlog.' if prefer_rlog else 'qlog.')]
+  selected = preferred if preferred else logs
+  return len(selected) != 1 or not stat.S_ISREG(selected[0][1]) or not 0 < selected[0][2][2] <= MAX_COMPRESSED_BYTES
+
+
+def _selected(route: dict, *, require_logs: bool = True) -> tuple[str, list[str]]:
   if not isinstance(route, dict):
     raise _Incomplete('Invalid route selection')
   route_id = route.get('routeId')
@@ -151,7 +210,7 @@ def _selected(route: dict) -> tuple[str, list[str]]:
   for index, segment in enumerate(segments):
     if not isinstance(segment, dict) or segment.get('number') != index or \
        not isinstance(segment.get('files'), dict) or \
-       not (segment['files'].get('qlog') is True or segment['files'].get('rlog') is True):
+       (require_logs and not (segment['files'].get('qlog') is True or segment['files'].get('rlog') is True)):
       raise _Incomplete('Route has missing segments or logs')
     name = segment.get('segmentName')
     matched = SEGMENT_NAME.fullmatch(name) if type(name) is str and len(name) <= 180 else None
@@ -274,9 +333,24 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
       raise _Incomplete('Invalid recording root')
     if not allowed():
       raise _Incomplete('Analysis cancelled')
-    route_id, names = _selected(route)
+    route_id, names = _selected(route, require_logs=not allow_partial)
     result['segmentCount'] = len(names)
-    if _route_names(root, route_id, allowed) != set(names):
+    inventory = None
+    omitted_tail = False
+    if allow_partial:
+      inventory = recording_inventory(root, route_id, allowed)
+      ordered = sorted(inventory, key=lambda name: inventory[name][0])
+      if ([inventory[name][0] for name in ordered] != list(range(len(ordered))) or ordered[:len(names)] != names or
+          any(not _unavailable_tail(inventory[name], prefer_rlog=prefer_rlog) for name in ordered[len(names):])):
+        raise _Incomplete('Route segments changed or are incomplete')
+      # Only discard an unavailable suffix. A hole followed by usable data is
+      # never bridged, even when DriveHistory omitted the locked directory.
+      while names and _unavailable_tail(inventory[names[-1]], prefer_rlog=prefer_rlog):
+        names.pop()
+      omitted_tail = len(names) != len(ordered)
+      if not names:
+        raise _Incomplete('Route has no observed duration')
+    elif _route_names(root, route_id, allowed) != set(names):
       raise _Incomplete('Route segments changed or are incomplete')
 
     first_car = last_car = first_state = last_state = None
@@ -296,7 +370,6 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
     attention_gap = False
     compressed_total = 0
     evidence = []
-    omitted_tail = False
     for index, name in enumerate(names):
       if not allowed():
         raise _Incomplete('Analysis cancelled')
@@ -405,7 +478,8 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
       if index == len(names) - 1:
         end_of_route = segment_end
       del events, compressed
-    if _route_names(root, route_id, allowed) != set(names):
+    if ((recording_inventory(root, route_id, allowed) != inventory) if allow_partial else
+        (_route_names(root, route_id, allowed) != set(names))):
       raise _Incomplete('Route source changed')
     for index, name in enumerate(names):
       if not allowed():
@@ -447,12 +521,16 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
       raise _Incomplete('Route samples are missing or gapped')
     if start_time is None:
       raise _Incomplete('Route has no logged or named wall time')
-    result['complete'] = end_of_route
-    result['partial'] = not end_of_route
-    if result['partial']:
-      result['reason'] = 'Recorded portion only; final segment unreadable' if omitted_tail else 'End of route was not recorded'
     if model_outputs:
       result['model'] = _model_label(model_outputs, model_loads or _rlog_model_loads(root, route, names, allowed), model)
+    if not allowed():
+      raise _Incomplete('Analysis cancelled')
+    if allow_partial and recording_inventory(root, route_id, allowed) != inventory:
+      raise _Incomplete('Route source changed')
+    result['complete'] = end_of_route and not omitted_tail
+    result['partial'] = not result['complete']
+    if result['partial']:
+      result['reason'] = 'Recorded portion only; final segment unreadable' if omitted_tail else 'End of route was not recorded'
     return result
   except (_Incomplete, LocalLogUnavailable, LogDecodeError, OSError, ValueError) as error:
     result['reason'] = str(error) or 'Route analysis unavailable'

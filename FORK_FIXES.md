@@ -48,7 +48,8 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
    prefix of a damaged frame or bridges a missing interior segment. These
    statistics survive restart, contribute only observed distance/time, and are
    replaced rather than added again if the recording is repaired. Personal
-   records use complete drives. Analysis version 6 retries older cached failures.
+   records use complete drives. Analysis version 7 retries older cached failures,
+   including locked/empty-tail inventory failures.
 
    Strict analysis remains the default for other callers. A partial dashboard
    result never becomes a completed FLM/trial receipt or accepted tune. Decoder
@@ -155,11 +156,56 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
    and its vehicle/migration fixes. The FLM CI workflow now includes `dom` and the
    new handoff, wire, driver-input and UI tests.
 
+9. **Indoor power cannot finish a file interrupted by the earlier power loss.**
+   The logger writes its normal route ending while shutting down; immediate loss
+   of power can prevent that ending and leave a lock, an empty directory, or an
+   unfinished compressed frame. Rebooting indoors does not replay the missing
+   shutdown. The live parked finisher previously rejected these tails during
+   inventory, before its decoder could consider usable earlier sections.
+
+   The finisher now retains the exact logger route identity across that reboot
+   and recovers independently closed, fully decoded sections. Missing route-end
+   markers also produce partial coverage when every available segment closed
+   normally. No route ending is fabricated and no recording or lock is modified.
+   Partial review selects at most 32 evenly spread closed segments; live parked
+   finishing uses at most 14. This sampling budget is independent of the 512
+   segment full-route admission limit. Coverage, omissions and the last intact
+   monotonic timestamp are reported; that cutoff is not an ignition-off time.
+
+   Recovered live fits can queue a candidate for fresh native qualification and
+   an independent live trial on the next drive. They do not turn an interrupted
+   trial into confirmed history or directly install accepted steering values.
+   Windows near an unobserved boundary are omitted conservatively: 1 s at the
+   leading edge and 350 ms at the trailing edge, with entire overlapping windows
+   discarded. Driver input elsewhere still excludes only its affected windows.
+   Offroad-only partial review remains diagnostic rather than completed-trial
+   proof. At least one independently closed original segment is required; an
+   interrupted first/only segment cannot be recovered by this policy.
+
+   Galaxy independently snapshots all route directories, including lock and log
+   metadata that the drive library hides. An unavailable trailing suffix no
+   longer causes the intact contiguous prefix to be rejected. Interior holes,
+   changed sources and cancellation still fail. Source repair or newly acquired
+   locks invalidate cached coverage; replacement never double-counts a route.
+   One unreadable route cannot prevent the remaining dashboard scan.
+
+   Parked permission and hardware checks remain required. Indoor USB power must
+   still provide the device/Panda status expected by the managed worker; this
+   patch does not treat missing physical status as permission to run. The change
+   applies after installing this fork, not to an unchanged upstream Dom device.
+
 ## Verification
 
-- Final affected Python regression suite: **1,059 passed**, with **267 passing subtests**.
+- Final affected Python regression suite: **1,075 passed**, with **269 passing subtests**.
   Existing tests emit one
   multiprocessing warning and three Cap'n Proto repeated-write warnings.
+- Recovery fixtures run the actual isolated parked fitter after an indoor reboot,
+  with locked, empty, truncated and missing-route-end inputs. Closed sections
+  produce only a provisional candidate; original files, locks and accepted-tune
+  Params remain unchanged. Tests also cover a wholly interrupted first segment,
+  repair replacement, unknown-boundary buffers, bounded 14-of-355 selection and
+  cancellation after a closed section. Galaxy tests cover hidden unavailable
+  suffixes, newly locked sources, cache-version retries and per-route isolation.
 - Additional merged-upstream regression suite: **669 passed**, with **471 passing
   subtests**, covering GM/Subaru callers and native handoffs, firmware, migration,
   radar association, model smoothing, speed control and update startup. The source
@@ -223,13 +269,14 @@ Connect import and live performance still need validation on the actual comma.
    When Auto Learn runs**, select **Offroad only · next-drive tune** while parked
    if preferred, then **Save for next drive**. Live learning remains experimental
    and needs validation on the actual vehicle.
-3. Leave the comma powered after ignition off so the logger can close the drive
-   and fitting can finish. New-build controller metadata is required for the live
-   handoff: an old recording cannot invent it. Galaxy reports either the queued
-   next-drive candidate or the reason more matching clean evidence is needed.
-   A damaged/unclosed source is not completed tuning evidence, and statistical
-   agreement alone does not confirm a live experiment. Keep power on through
-   analysis; a bounded processing refusal leaves the accepted tune unchanged.
+3. Keeping power through ignition off allows normal logger closure. If power is
+   lost first, powering the comma indoors can now analyze intact closed sections
+   and finish a partial fit while parked. Leave it powered through analysis and
+   ensure the parked hardware status is available. New-build controller metadata
+   is required for the live handoff: an old recording cannot invent it. Galaxy
+   reports the candidate or why more matching clean evidence is needed. Partial
+   source coverage and statistical agreement alone never confirm a live trial;
+   a bounded processing refusal leaves the accepted tune unchanged.
 4. Existing local recordings are reviewed automatically while parked. For a
    particular cloud route, use **Steering → Activity → Existing routes** and
    explicitly request it. Dashboard statistics remain a separate analysis path;
