@@ -38,6 +38,7 @@ tinygrad_model_runtime/** !filter !diff !merge -text
 *.pkl -text
 
 # Native release artifacts must retain exact binary bytes.
+installer-dom -text
 *.a -text
 *.so -text
 *.so.* -text

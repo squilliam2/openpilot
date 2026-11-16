@@ -3,6 +3,9 @@ const count = value => value === null || Number.isSafeInteger(value) && value >=
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const keysAre = (value, keys) => record(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 const stamp = value => Number.isSafeInteger(value) && value >= 0
+// Partial inventory is bounded by drive_history.MAX_ROOT_ENTRIES, independently
+// of the lower full-route admission and selected-section decoding limits.
+const MAX_PARTIAL_SEGMENTS = 2048
 const REFUSAL_SERVICES = ['deviceMotion', 'extrinsicsCalibration', 'carState', 'driverMonitoringState']
 function refusalSnapshot(value) {
   return value === null || keysAre(value, ['reason', 'observedMonoTime', 'readyPairs', 'currentNative', 'controlMonoTime',
@@ -331,8 +334,11 @@ export function offroadView(report) {
   const savedCount = details['Saved route adjustment count']
   const partial = details['Drive analysis is partial'] === true
   const partialSegments = details['Partial drive segments']
+  const completionProven = details['Original route completion proven']
   if (partial && (!Array.isArray(partialSegments) || partialSegments.length !== 2 || !partialSegments.every(stamp) ||
-      partialSegments[0] < 1 || partialSegments[0] >= partialSegments[1] || partialSegments[1] > 180)) return null
+      partialSegments[0] < 1 || partialSegments[0] > partialSegments[1] || partialSegments[1] > MAX_PARTIAL_SEGMENTS ||
+      completionProven !== undefined && completionProven !== false ||
+      partialSegments[0] === partialSegments[1] && completionProven !== false)) return null
   const latestRecording = details['Latest completed recording reviewed'], earlierSource = details['Findings retained from earlier drive']
   const earlierDrive = latestRecording !== undefined || earlierSource !== undefined
   if (earlierDrive && (!text(latestRecording, 180) || !latestRecording || latestRecording === details['Completed drive analyzed'] ||
@@ -386,8 +392,19 @@ export function tunerStatus(report, live = false, choiceLive = false, error = ""
   if (error) return { key: "offline", tone: "muted", title: "Connection interrupted", description: "Earlier results are available below. Current steering activity is unknown." }
   if (preference?.valid && preference.enabled === false || !preference && live && current?.enabled === false)
     return { key: "off", tone: "muted", title: "Auto Learn is off", description: "No driving samples are being collected by the learner. Turn it on in steering settings to begin." }
-  if (reportFresh && current?.status === 'fitting' && ['analyzing_last_completed_drive', 'checking_recorded_steering_recommendations'].includes(current.reason))
+  if (current && !reportFresh)
+    return { key: "stale", tone: "muted", title: "Learner status has not refreshed", description: "Earlier observations remain below. Whether analysis is still running or a correction is being applied is unknown." }
+  if (reportFresh && current?.status === 'unavailable')
+    return { key: "paused", tone: "warning", title: preference?.parked ? "Drive review could not finish" : "Learning paused", description: learningReason(current.reason) }
+  if (reportFresh && current?.status === 'fitting' && ['analyzing_last_completed_drive', 'checking_recorded_steering_recommendations', 'finishing_live_drive_while_parked'].includes(current.reason))
     return { key: 'fitting', tone: 'active', title: 'Analyzing your drive', description: learningReason(current.reason) + (offroadView(report)?.retained ? ' Earlier drive findings remain below while this analysis runs.' : '') }
+  if (reportFresh && current?.status === 'collecting' && current.details?.['Live-drive fit finished while parked'] === true &&
+      current.details?.['Parked result needs fresh live qualification'] === true &&
+      ['parked_candidate_waiting_for_fresh_live_checks', 'parked_live_fit_needs_more_consistent_evidence',
+        'parked_live_current_controller_not_recorded', 'parked_live_current_accepted_profile_not_recorded'].includes(current.reason))
+    return { key: 'parked-fit', tone: current.reason === 'parked_candidate_waiting_for_fresh_live_checks' ? 'ready' : 'warning',
+      title: current.reason === 'parked_candidate_waiting_for_fresh_live_checks' ? 'Next-drive candidate queued' : 'Drive fit finished',
+      description: learningReason(current.reason) }
   const route = reportFresh && (!preference || preference.parked) ? offroadView(report) : null
   if (route) {
     if (route.partial)

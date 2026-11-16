@@ -134,6 +134,39 @@ assert.equal(retained.current.application.applied, false, 'Retained disk values 
 const fitting = structuredClone(completed)
 fitting.current.status = 'fitting'; fitting.current.reason = 'analyzing_last_completed_drive'
 assert.equal(tunerStatus(fitting, true, true).title, 'Analyzing your drive')
+// A current setting cannot overwrite the result or freshness of actual work.
+const retry = structuredClone(fitting)
+retry.current.details = {}
+retry.current.status = 'unavailable'
+retry.current.reason = 'parked_live_current_controller_not_recorded'
+assert.equal(tunerStatus(retry, false, true, '', true).title, 'Drive review could not finish')
+assert.match(tunerStatus(retry, false, true, '', true).description, /current controller setup/)
+retry.preference.parked = false
+assert.equal(tunerStatus(retry, true, true, '', true).title, 'Learning paused', 'Live refusals must not imply parked analysis')
+assert.equal(tunerStatus(fitting, false, true, '', false).key, 'stale', 'Stale fitting is unknown, not idle or completed analysis')
+assert.doesNotMatch(tunerStatus(fitting, false, true, '', false).title, /Auto Learn is on|analyzed|finished/i)
+const failureWithEarlierFindings = structuredClone(completed)
+failureWithEarlierFindings.current.status = 'unavailable'
+assert.equal(tunerStatus(failureWithEarlierFindings, false, true, '', true).key, 'paused',
+  'Earlier findings cannot hide a current failure')
+const finishing = structuredClone(fitting)
+finishing.current.reason = 'finishing_live_drive_while_parked'
+assert.equal(tunerStatus(finishing, false, true, '', true).key, 'fitting')
+finishing.current.status = 'collecting'
+finishing.current.reason = 'parked_candidate_waiting_for_fresh_live_checks'
+Object.assign(finishing.current.details, { 'Live-drive fit finished while parked': true,
+  'Parked result needs fresh live qualification': true })
+assert.equal(tunerStatus(finishing, false, true, '', true).title, 'Next-drive candidate queued')
+assert.match(tunerStatus(finishing, false, true, '', true).description, /Fresh live checks.*independent trial/)
+assert.equal(finishing.current.application.applied, false, 'A queued candidate is not applied steering')
+for (const reason of ['parked_live_fit_needs_more_consistent_evidence', 'parked_live_current_controller_not_recorded',
+  'parked_live_current_accepted_profile_not_recorded']) {
+  finishing.current.reason = reason
+  assert.equal(tunerStatus(finishing, false, true, '', true).title, 'Drive fit finished')
+  assert.equal(tunerStatus(finishing, false, true, '', true).description, learningReason(reason))
+}
+finishing.preference.enabled = false
+assert.equal(tunerStatus(finishing, false, true, '', true).key, 'off', 'Explicit OFF always takes precedence')
 const partial = structuredClone(completed)
 Object.assign(partial.current.details, {
   'Drive analysis is partial': true, 'Partial drive segments': [9, 10], 'Analysis decision': 'partial_drive_provisional_only',
@@ -142,10 +175,25 @@ assert(validTrainingResults(partial))
 assert.equal(offroadView(partial).partial, true)
 assert.deepEqual(offroadView(partial).partialSegments, [9, 10])
 assert.equal(tunerStatus(partial, true, true).key, 'partial')
-for (const coverage of [[0, 10], [10, 10], [11, 10], [9, 181], [9.5, 10], [true, 10]]) {
+for (const coverage of [[0, 10], [10, 10], [11, 10], [9, 2049], [9.5, 10], [true, 10]]) {
   const bad = structuredClone(partial); bad.current.details['Partial drive segments'] = coverage
   assert.equal(offroadView(bad), null, 'Partial coverage cannot imply a complete drive or invent section counts')
 }
+for (const coverage of [[14, 355], [32, 513], [32, 2048], [1, 1]]) {
+  const recovered = structuredClone(partial)
+  Object.assign(recovered.current.details, { 'Partial drive segments': coverage, 'Original route completion proven': false })
+  assert.deepEqual(offroadView(recovered).partialSegments, coverage, 'The wire accepts bounded recovery coverage')
+  assert.equal(tunerStatus(recovered, false, true, '', true).key, 'partial')
+  assert.equal(recovered.current.application.applied, false)
+}
+for (const completion of [undefined, true, 0, 'false']) {
+  const unproven = structuredClone(partial)
+  Object.assign(unproven.current.details, { 'Partial drive segments': [1, 1], 'Original route completion proven': completion })
+  assert.equal(offroadView(unproven), null, 'Equal counts require explicit missing route-completion evidence')
+}
+const contradictoryPartial = structuredClone(partial)
+contradictoryPartial.current.details['Original route completion proven'] = true
+assert.equal(offroadView(contradictoryPartial), null, 'Partial coverage cannot also assert proven whole-route completion')
 const disabled = structuredClone(completed); disabled.preference.enabled = false
 assert.equal(tunerStatus(disabled, true, true).title, 'Auto Learn is off')
 for (const mutate of [v => v.current.details['Recorded route suggestions'][0][1] = .251,

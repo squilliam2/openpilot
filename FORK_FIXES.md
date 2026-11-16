@@ -1,9 +1,11 @@
 # Personal Dom fork: FLM and drive history
 
-Updated through [upstream `Dom` 1abbbc6d19f8](https://github.com/StarPilotHQ/StarPilot/commit/1abbbc6d19f840dcca44512bb20ee7b738bb090e).
+Updated through [upstream `Dom` 8688217e10f2](https://github.com/StarPilotHQ/StarPilot/commit/8688217e10f2d17321c6e660393d054e2911bb34).
 The original investigation used upstream `cfafb8ca72c6`.
 Install branch: [`squilliam2/openpilot:dom`](https://github.com/squilliam2/openpilot/tree/dom).
-Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
+Custom software URL: **https://raw.githubusercontent.com/squilliam2/openpilot/dom/installer-dom**.
+The older `installer.comma.ai/squilliam2/dom` endpoint currently fails on the
+tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
 
 ## Findings and changes
 
@@ -194,6 +196,45 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
    patch does not treat missing physical status as permission to run. The change
    applies after installing this fork, not to an unchanged upstream Dom device.
 
+10. **The Overview could hide analysis failures behind "Auto Learn is on".**
+    Upstream's status selector checks the generic parked preference before its
+    unavailable-report branch. A fresh recording/fit refusal therefore looks
+    like idle enabled learning. An analysis heartbeat older than the freshness
+    bound also falls back to the same label. The worker checks work roughly every
+    10 seconds and can advance across routes; alternating these titles alone is
+    not evidence of progress through different segments or of a successful tune.
+
+    Fresh failures now show the actual reason ahead of old findings and the
+    generic preference. Stale reports explicitly say the current state is
+    unknown. Live parked fitting, finished fits and candidates awaiting fresh
+    qualification have separate truthful states. Explicit OFF still wins.
+    Partial reports now accept the backend's bounded 2,048-segment inventory,
+    rather than an obsolete 180 limit. N/N coverage requires explicit absence of
+    proven route completion; contradictory completion claims remain rejected.
+
+11. **The comma-four installer can fail before this repository is downloaded.**
+    The device's AGNOS 20.5.2 setup terminal reported that `/tmp/installer` could
+    not load `libwayland-egl.so.1`. The hosted installer imports the older Wayland
+    graphics backend. Its process exits before creating `/data/continue.sh`, so
+    the AGNOS setup loop returns to software selection. The same failure affects
+    upstream Dom; changing FLM does not repair that earlier loader stage.
+
+    A fresh public shallow clone, checkout, Git object check, vendored-source
+    validation and release-receipt validation all passed. The fork's hosted
+    installer is byte-identical to comma's official comma-four installer except
+    for its repository/branch placeholders. Its HTTP length and ELF fields are
+    valid. No missing or fake graphics libraries should be added to AGNOS.
+
+    `installer-dom` is a static AArch64 bootstrap built from the included
+    `tools/installer` sources, with no ELF interpreter or shared-library needs.
+    It runs a fixed fresh-install transaction: pin the public Dom commit, clone
+    into its own staging folder, validate vendored source and the release receipt,
+    install without replacing any existing target, and publish the AGNOS
+    continuation last. The existing screen may appear unchanged during download;
+    this bootstrap has no second graphical installer screen. Failures remain in
+    `/data/starpilot-installer.log`. It does not modify AGNOS or graphics packages.
+    Existing software must first be uninstalled through its normal UI.
+
 ## Verification
 
 - Final affected Python regression suite: **1,075 passed**, with **269 passing subtests**.
@@ -211,6 +252,16 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
   radar association, model smoothing, speed control and update startup. The source
   copy needs its own declared dirty QA build metadata and source-built x86 vision
   IPC binding; these QA-only artifacts are not part of the device download.
+- The latest upstream merge additionally passes **1,623 tests and 100 subtests**
+  with two skips across Hyundai display ownership, Toyota intent/source gaps,
+  regional settings migration, Home branch labels, browser setup and retained-OS
+  update contracts. The 1,075-test FLM/Galaxy suite was repeated on this merge.
+- Installer contracts: **24 tests passed**, Ruff and pinned ty passed, and a
+  clean second ARM build was byte-identical. The 597,856-byte ELF has SHA-256
+  `9163ed8a8820308800d5b7c811411a292addd51a7acfed08dfa5487853264404`.
+  Its argument-refusal path also executed successfully on the actual comma four
+  while leaving installation targets unchanged. This proves startup without the
+  old Wayland dependency; it is separate from full installation and driving QA.
 - **102 non-browser Galaxy JavaScript test files passed.** The patched dashboard
   also passed real headless Chrome checks at 416 and 1280 pixel widths: observed
   distance and partial-coverage labels render without overflow or browser errors.
@@ -220,6 +271,10 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
   also exercise the actual new route-review and learning-mode components at both
   widths, including queuing a Connect review and saving Live mode through local
   API fixtures. No browser errors or horizontal overflow were observed.
+- Actual FLM Overview Chrome checks at exact 416 and 1280 pixel widths exercise
+  analyzing, fresh refusal, stale ongoing work and a queued candidate with earlier
+  findings retained. The visible heading follows the current status, separately
+  saved values remain available, and no current steering application is claimed.
 - Regression coverage includes registered Sonata parked/live scope agreement,
   different devices/firmware/reset generations, missing identity refusal,
   355-segment admission and 513-segment refusal, damaged/interior/cancelled logs,
@@ -255,8 +310,9 @@ Custom software URL: **https://installer.comma.ai/squilliam2/dom**.
   this removes a race in the upstream test, rather than changing tune storage.
 
 No private route files, location data, device IDs or Galaxy export are included
-in this repository. This is a Python/web patch using the upstream ARM binaries;
-it is not a new full native build or a road-tested steering calibration. Device
+in this repository. The driving runtime retains the upstream ARM binaries; the
+separate installation bootstrap is newly compiled from its included sources.
+This is not a new full driving-system build or a road-tested calibration. Device
 authentication/download failure paths are tested with API fixtures; authenticated
 Connect import and live performance still need validation on the actual comma.
 

@@ -131,6 +131,10 @@ export const FlmPage = {
     offroad() { return offroadView(this.report) },
     review() {
       const result = reviewModel(this.offroad, this.offroad?.retained, this.offroad?.retained)
+      const staleWork = this.state?.key === 'stale' && (['fitting', 'unavailable'].includes(this.current?.status) ||
+        this.current?.details?.['Live-drive fit finished while parked'] === true)
+      if (this.current && (staleWork || ['fitting', 'parked-fit', 'paused'].includes(this.state?.key)))
+        return { ...result, title: this.state.title, description: this.state.description, next: this.state.description }
       if (!this.offroad && typeof this.current?.details?.['Completed drive analyzed'] === 'string') {
         const otherVehicle = this.preference?.vehicle && this.report?.vehicle && this.preference.vehicle !== this.report.vehicle
         return { ...result, title: otherVehicle ? 'This report is for another vehicle' : 'The drive report is incomplete',

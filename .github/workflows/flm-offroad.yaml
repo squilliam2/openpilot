@@ -9,6 +9,8 @@ on:
       - 'openpilot/starpilot/aol/**'
       - 'openpilot/starpilot/galaxy/web/js/flm*.js'
       - 'openpilot/starpilot/galaxy/tests/test_flm*.mjs'
+      - 'tools/installer/**'
+      - 'installer-dom*'
       - 'openpilot/starpilot/galaxy/drive_history.py'
       - 'openpilot/selfdrive/controls/lib/latcontrol*'
       - 'openpilot/selfdrive/controls/controlsd.py'
@@ -91,6 +93,7 @@ jobs:
             openpilot/starpilot/galaxy/tests/test_drive_history.py \
             openpilot/starpilot/galaxy/tests/test_drive_analysis.py \
             openpilot/starpilot/galaxy/tests/test_drive_stats.py \
+            tools/installer/tests/test_static_installer.py \
             --json-output ci-results/flm-offroad.json
           .venv/bin/python -m pytest -q --import-mode=importlib \
             openpilot/starpilot/flm/tests/test_upstream_producer_transport.py \

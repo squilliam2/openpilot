@@ -1,0 +1,22 @@
+{
+  "compiler": "aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "elfSha256": "9163ed8a8820308800d5b7c811411a292addd51a7acfed08dfa5487853264404",
+  "embeddedScriptSha256": "8da0d8ca1eed451ef8ff09397ecf768756d27714c4c90c4bdb9fe641c25383ef",
+  "flags": [
+    "-std=c11",
+    "-static",
+    "-Os",
+    "-s",
+    "-fno-ident",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Wl,--build-id=none"
+  ],
+  "schemaVersion": 1,
+  "sourceSha256": {
+    "bootstrap.c": "4434b0134f22ff2e0148be143a6dafa6ffb8064dcc6e1d0d3e2cf6cd2d836723",
+    "bootstrap.sh": "a20b2a54f773e59435cbebb6bbc74177151e555b8ccc4f922166ec26db0733a9",
+    "install.py": "dd1997e38b3deb9530e3f979a9aaeabcd853c60baa53ec4d5f92bdcd2d3abfe8"
+  }
+}

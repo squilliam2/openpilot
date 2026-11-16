@@ -73,7 +73,7 @@ assert.doesNotMatch(readFileSync(new URL('../web/js/flm.js', import.meta.url), '
 for (const view of ['overview', 'tune', 'activity', 'plots']) assert(FlmPage.template.includes(`view === '${view}'`))
 const choice = { version: 1, valid: true, enabled: true, parked: true, vehicle: 'HYUNDAI_IONIQ_6' }
 assert(validLearningPreference(choice))
-assert.equal(tunerStatus({ ...value, preference: choice }, false, true).key, 'parked')
+assert.equal(tunerStatus({ ...value, preference: choice }, false, true, '', true).key, 'parked')
 assert.equal(tunerStatus({ ...value, preference: { ...choice, enabled: false } }, true, true).key, 'off')
 assert.equal(tunerStatus({ ...value, preference: choice }, false, false).key, 'stale')
 assert.equal(tunerStatus({ ...value, preference: choice }, true, true, 'offline').key, 'offline')
@@ -94,6 +94,36 @@ function instance() {
   for (const [name, method] of Object.entries(FlmPage.computed)) Object.defineProperty(vm, name, { get: () => method.call(vm) })
   return vm
 }
+// The rendered overview consumes review, rather than the older heroTitle field.
+// Current work/failure/freshness must win while earlier findings remain usable.
+const visible = instance()
+visible.now = visible.receivedAt = 1000
+visible.report = { ...report(), preference: choice }
+Object.assign(visible.report.current.details, {
+  'Completed drive analyzed': 'declared-drive', 'Recorded steering observations': 120,
+  'Analysis decision': 'recorded_tracking_suggestion_not_yet_qualified_for_automatic_application',
+  'Recorded route suggestions': [['turn_in_boost_left', .005, 6, 'controller_native_checks_not_passed']],
+  'Full surface coordinates': map(.005), 'Saved route configuration state': 'ready_for_next_drive',
+  'Earlier analysis shown while updating': true,
+})
+visible.report.current.status = 'fitting'; visible.report.current.reason = 'analyzing_last_completed_drive'
+assert.equal(visible.review.title, 'Analyzing your drive')
+assert.equal(visible.review.findings.length, 1)
+assert.equal(visible.review.saved.length, 1, 'Current status cannot erase separately reported saved values')
+visible.report.current.status = 'unavailable'; visible.report.current.reason = 'parked_live_current_controller_not_recorded'
+assert.equal(visible.review.title, 'Drive review could not finish')
+assert.match(visible.review.description, /current controller setup/)
+visible.now += 2100
+assert.equal(visible.review.title, 'Learner status has not refreshed')
+visible.now = visible.receivedAt
+visible.report.current.status = 'collecting'; visible.report.current.reason = 'parked_candidate_waiting_for_fresh_live_checks'
+Object.assign(visible.report.current.details, { 'Live-drive fit finished while parked': true,
+  'Parked result needs fresh live qualification': true })
+assert.equal(visible.review.title, 'Next-drive candidate queued')
+assert.match(visible.review.description, /Fresh live checks/)
+assert.equal(visible.review.saved.length, 1)
+assert.equal(visible.review.findings.length, 1)
+assert.equal(visible.currentApplied, false)
 const originalFetch = globalThis.fetch, originalDocument = globalThis.document
 try {
   globalThis.document = { getElementById: () => null, hidden: false, addEventListener() {}, removeEventListener() {} }
