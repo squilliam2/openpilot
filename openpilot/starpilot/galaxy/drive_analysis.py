@@ -13,7 +13,7 @@ import stat
 import time
 
 from openpilot.starpilot.flm.local_logs import DIR_FLAGS, FILE_FLAGS, MAX_COMPRESSED_BYTES, LocalLogUnavailable
-from openpilot.starpilot.flm.log_decode import LogDecodeError, decode_segment
+from openpilot.starpilot.flm.log_decode import LogDecodeCancelled, LogDecodeError, decode_segment
 from openpilot.starpilot.galaxy.lateral_stats import ControlSamples, aol_statistics
 from openpilot.starpilot.galaxy.drive_history import MAX_ROOT_ENTRIES, MAX_SEGMENT_ENTRIES, MAX_STATS_SEGMENTS_PER_ROUTE, SEGMENT_NAME
 from openpilot.starpilot.models.catalog import model_entries
@@ -24,8 +24,8 @@ from openpilot.starpilot.models.status import ModelVariant
 MAX_ANALYSIS_SECONDS = 30.0
 MAX_PAIR_SECONDS = 1.0
 MAX_SPEED_MPS = 70.0
-MAX_ROUTE_COMPRESSED_BYTES = 256 * 1024 * 1024
-ANALYSIS_VERSION = 5
+MAX_ROUTE_COMPRESSED_BYTES = MAX_STATS_SEGMENTS_PER_ROUTE * MAX_COMPRESSED_BYTES
+ANALYSIS_VERSION = 6
 MAX_MODEL_METADATA_SECONDS = 4.0
 DISTRACTED_EVENT = 'driverDistracted2'
 UNRESPONSIVE_EVENT = 'driverUnresponsive3'
@@ -252,15 +252,16 @@ def _rlog_model_loads(root, route, names, allowed):
     return []
 
 
-def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], prefer_rlog: bool = False) -> dict:
+def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], prefer_rlog: bool = False,
+                  allow_partial: bool = False) -> dict:
   """Return a complete route only when every selected source and sample span is sound."""
   result = {'routeId': route.get('routeId') if isinstance(route, dict) else None,
             'startTime': None, 'endTime': None, 'distanceMeters': None, 'durationSeconds': None,
             'engagedSeconds': None, 'engagedPercent': None, 'aolSeconds': None, 'aolPercent': None, 'model': None,
             'distractedMoments': None, 'unresponsiveMoments': None,
-            'complete': False, 'reason': None, 'segmentCount': 0, 'analysisVersion': ANALYSIS_VERSION}
+            'complete': False, 'partial': False, 'reason': None, 'segmentCount': 0, 'analysisVersion': ANALYSIS_VERSION}
   segment_count = len(route.get('segments', [])) if isinstance(route, dict) else 0
-  deadline = time.monotonic() + min(120.0, max(60.0, segment_count * 14.0))
+  deadline = time.monotonic() + min(7200.0, max(60.0, segment_count * 14.0))
   def allowed() -> bool:
     if time.monotonic() > deadline:
       return False
@@ -295,6 +296,7 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
     attention_gap = False
     compressed_total = 0
     evidence = []
+    omitted_tail = False
     for index, name in enumerate(names):
       if not allowed():
         raise _Incomplete('Analysis cancelled')
@@ -305,9 +307,19 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
       compressed_total += len(compressed)
       if compressed_total > MAX_ROUTE_COMPRESSED_BYTES:
         raise _Incomplete('Route source changed or exceeds analysis limit')
-      events = decode_segment(compressed, codec, cancelled=lambda: not allowed(),
-                              retain=frozenset(('clocks', 'initData', 'logMessage', 'modelV2', 'drivingModelData',
-                                                'carState', 'selfdriveState', 'carControl', 'onroadEvents', 'sentinel')))
+      try:
+        events = decode_segment(compressed, codec, cancelled=lambda: not allowed(),
+                                retain=frozenset(('clocks', 'initData', 'logMessage', 'modelV2', 'drivingModelData',
+                                                  'carState', 'selfdriveState', 'carControl', 'onroadEvents', 'sentinel')))
+      except LogDecodeCancelled:
+        raise
+      except LogDecodeError:
+        if not allow_partial or index == 0 or index != len(names) - 1 or not allowed():
+          raise
+        # Count only fully decoded sources. Never use the decodable prefix of a
+        # damaged frame, and never bridge a missing interior segment.
+        omitted_tail = True
+        break
       segment_end = False
       for event in events:
         if not allowed():
@@ -428,14 +440,17 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
       result['engagedSeconds'] = round(min(engaged, duration), 3)
       result['engagedPercent'] = round(min(engaged, duration) / duration * 100, 1)
     result.update(aol_statistics(control_samples, first, last, max_pair_seconds=MAX_PAIR_SECONDS))
-    if not end_of_route:
+    if not end_of_route and not allow_partial:
       raise _Incomplete('End of route was not recorded')
     if not car_pairs or not state_pairs or coverage_gap or \
        max(first_car - first, first_state - first, last - last_car, last - last_state) > MAX_PAIR_SECONDS * 1e9:
       raise _Incomplete('Route samples are missing or gapped')
     if start_time is None:
       raise _Incomplete('Route has no logged or named wall time')
-    result['complete'] = True
+    result['complete'] = end_of_route
+    result['partial'] = not end_of_route
+    if result['partial']:
+      result['reason'] = 'Recorded portion only; final segment unreadable' if omitted_tail else 'End of route was not recorded'
     if model_outputs:
       result['model'] = _model_label(model_outputs, model_loads or _rlog_model_loads(root, route, names, allowed), model)
     return result
@@ -444,5 +459,10 @@ def analyze_route(root: Path, route: dict, *, permitted: Callable[[], bool], pre
     if (not prefer_rlog and result['reason'] in ('Route samples are missing or gapped', 'Route has no observed duration', 'End of route was not recorded') and
         isinstance(route, dict) and route.get('segments') and
         all(segment.get('files', {}).get('rlog') is True for segment in route['segments']) and permitted()):
-      return analyze_route(root, route, permitted=allowed, prefer_rlog=True)
+      return analyze_route(root, route, permitted=allowed, prefer_rlog=True, allow_partial=allow_partial)
     return result
+
+
+def analyze_recorded_route(root: Path, route: dict, *, permitted: Callable[[], bool]) -> dict:
+  """Dashboard-only observed coverage; never a completed FLM/trial receipt."""
+  return analyze_route(root, route, permitted=permitted, allow_partial=True)

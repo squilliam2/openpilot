@@ -102,6 +102,15 @@ const paused = driveSummary({ status: "ready", data: { ...drives, lastDrive: inc
 assert.equal(paused.last.analysisLabel, "Incomplete recording")
 assert.equal(paused.recent[0].analysisError, undefined)
 assert.equal(paused.recent[0].analysisLabel, "Incomplete recording")
+const portion = driveSummary({ status: "ready", data: { ...drives,
+  lastDrive: { ...incomplete, partial: true }, recentDrives: [{ ...incomplete, partial: true }],
+  coverage: { partialRoutes: 1 } } })
+assert.equal(portion.last.partial, true)
+assert.equal(portion.recent[0].partial, true)
+assert.equal(portion.recent[0].distance, "12.0 km")
+assert.equal(portion.recent[0].analysisLabel, "Recorded portion only")
+assert.equal(portion.partialRoutes, 1)
+assert.match(Home.template, /Recorded portion included in totals/)
 const retrying = driveSummary({ status: "ready", data: { ...drives, recentDrives: [incomplete],
   analysis: { ...drives.analysis, failures: [{ routeId: route.routeId, reason: "TimeoutError", retryStopped: false }] } } })
 assert.equal(retrying.recent[0].analysisLabel, "Incomplete recording")

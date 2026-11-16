@@ -1879,7 +1879,7 @@ class TestOffroadTrackingPolicy(unittest.TestCase):
     self.assertEqual(selected_segments(100), tuple(sorted(base)))
     self.assertEqual(selected_segments(100, expanded=True), tuple(sorted(base | set(additional))))
     self.assertEqual(len(selected_segments(100, expanded=True)), 43)
-    for count in (1, 2, 3, 41, 100, 180):
+    for count in (1, 2, 3, 41, 100, 180, 355, 512):
       selected = selected_segments(count, expanded=True)
       self.assertLessEqual(len(selected), 43)
       self.assertEqual(tuple(sorted(set(selected))), selected)

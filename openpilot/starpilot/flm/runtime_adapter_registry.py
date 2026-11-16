@@ -257,6 +257,8 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
   """Only startup/separate-process settings work; errors disable learning."""
   cp_sha256 = car_params_digest(cp) if cp_sha256 is None else cp_sha256
   try:
+    from openpilot.starpilot.flm.vehicle_identity import identity_keys, persistent_unit
+
     keys = tuple(
       dict.fromkeys(
         (
@@ -269,6 +271,7 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
           'SafeMode',
           'TurnAssist',
           *LEGACY_KEYS,
+          *identity_keys(cp),
         )
       )
     )
@@ -359,11 +362,16 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
       raise ValueError('invalid calibration lifecycle')
     frame_identity = calibration if not calibration_generation else ('live_vehicle_frame_v2', calibration_generation)
     epoch = digest((tuple((key, None if raw is None else raw.hex()) for key, raw in snapshots), frame_identity, unit))
-    persistent_epoch = (
-      digest(('persistent_vehicle_source_v1', cp_sha256, tuple((key, None if raw is None else raw.hex()) for key, raw in snapshots), vin))
-      if is_valid_vin(vin) and vin != VIN_UNKNOWN and calibration_generation
-      else ''
-    )
+    # Unknown-VIN drives may still collect transient evidence without a device
+    # binding. Only a qualified binding can restore a parked profile.
+    persistent_epoch = ''
+    if calibration_generation:
+      try:
+        persistent_epoch = digest(('persistent_vehicle_source_v1', cp_sha256,
+                                   tuple((key, None if raw is None else raw.hex()) for key, raw in snapshots),
+                                   persistent_unit(cp, raw_by_key)))
+      except ValueError:
+        pass
     return SourceState(
       bool(preference.valid and preference.enabled and raw_by_key['OpenpilotEnabledToggle'] == b'1' and raw_by_key['SafeMode'] in (None, b'0')),
       manual,

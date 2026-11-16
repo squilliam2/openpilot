@@ -50,6 +50,8 @@ def _valid_record(value: object) -> bool:
     return False
   if type(value.get('complete')) is not bool or type(value.get('ignored')) is not bool:
     return False
+  if type(value.get('partial', False)) is not bool or value.get('partial') and value['complete']:
+    return False
   if type(value.get('segmentCount')) is not int or not 0 <= value['segmentCount'] <= MAX_STATS_SEGMENTS_PER_ROUTE:
     return False
   for key in ('startTime', 'endTime'):
@@ -83,11 +85,15 @@ def _valid_record(value: object) -> bool:
           len(revision) != 5 or any(type(part) is not int or part < 0 for part in revision)
           for key, revision in manifest.items())):
     return False
-  if value['complete'] and (value.get('startTime') is None or value.get('endTime') is None or
+  if _has_stats(value) and (value.get('startTime') is None or value.get('endTime') is None or
       any(value.get(key) is None for key in ('distanceMeters', 'durationSeconds', 'engagedSeconds')) or
       value['endTime'] < value['startTime'] or value['engagedSeconds'] > value['durationSeconds']):
     return False
   return True
+
+
+def _has_stats(record):
+  return record.get('complete') is True or record.get('partial') is True
 
 
 def _route_signature(root: Path, route: dict) -> tuple[str, dict]:
@@ -168,8 +174,8 @@ class DriveStatsOwner:
                                                                     max_segments=MAX_ROOT_ENTRIES)
     self.root = Path(self.history.root) if self.root is None else self.root
     if analyzer is None:
-      from openpilot.starpilot.galaxy.drive_analysis import analyze_route
-      analyzer = analyze_route
+      from openpilot.starpilot.galaxy.drive_analysis import analyze_recorded_route
+      analyzer = analyze_recorded_route
     self.analyzer = analyzer
     self.permitted = permitted if permitted is not None else lambda: False
     self.clock = clock if clock is not None else lambda: datetime.now(UTC).timestamp()
@@ -295,7 +301,7 @@ class DriveStatsOwner:
         with self._lock:
           existing = self._records.get(route_id)
           failed = self._failures.get(route_id)
-          if (existing and existing.get('sourceSignature') == signature and existing.get('complete') and
+          if (existing and existing.get('sourceSignature') == signature and _has_stats(existing) and
               existing.get('analysisVersion', 0) >= ANALYSIS_VERSION):
             continue
           if (existing and existing.get('complete') and manifest != existing.get('sourceManifest') and
@@ -325,9 +331,10 @@ class DriveStatsOwner:
         with self._lock:
           existing = self._records.get(route_id)
           failed = self._failures.get(route_id)
-          if existing and existing.get('complete') and existing.get('sourceSignature') != signature:
+          if existing and _has_stats(existing) and existing.get('sourceSignature') != signature:
             prior = existing.copy()
             existing['complete'] = False
+            existing['partial'] = False
             existing['reason'] = 'sourceChanged'
             try:
               self._save()
@@ -347,6 +354,7 @@ class DriveStatsOwner:
           record = {key: result.get(key) for key in ('routeId', 'startTime', 'endTime', 'distanceMeters',
                     'durationSeconds', 'engagedSeconds', 'engagedPercent', 'aolSeconds', 'aolPercent', 'model',
                     'distractedMoments', 'unresponsiveMoments', 'complete', 'reason', 'segmentCount')}
+          record['partial'] = result.get('partial', False)
           record['ignored'] = bool(existing and existing.get('ignored'))
           record['analysisVersion'] = result.get('analysisVersion', ANALYSIS_VERSION)
           record['sourceSignature'] = signature
@@ -364,7 +372,7 @@ class DriveStatsOwner:
             refreshing_complete = (current and current.get('complete') and current.get('sourceSignature') == signature)
             if record['complete'] or not refreshing_complete:
               self._records[route_id] = record
-            if record['complete']:
+            if _has_stats(record):
               self._failures.pop(route_id, None)
             else:
               self._failures[route_id] = self._failure(signature, prior_failure, record.get('reason') or 'Incomplete recording')
@@ -476,7 +484,7 @@ class DriveStatsOwner:
     day = now.date()
     monday = day - timedelta(days=day.weekday())
     dates = [(monday + timedelta(days=n)).isoformat() for n in range(7)]
-    complete = [r for r in self._records.values() if r['complete'] and not r['ignored']]
+    complete = [r for r in self._records.values() if _has_stats(r) and not r['ignored']]
     complete.sort(key=lambda r: (r.get('startTime') or 0, r['routeId']), reverse=True)
     recent = sorted(self._records.values(), key=lambda r: (r.get('startTime') or 0, r['routeId']), reverse=True)
     week = [r for r in complete if datetime.fromtimestamp(r['startTime'], zone).date().isoformat() in dates]
@@ -514,7 +522,7 @@ class DriveStatsOwner:
         model['drives'] += 1
     models = [{'name': name, **amounts} for name, amounts in model_totals.items()]
     models.sort(key=lambda m: (-m['distanceMeters'], m['name']))
-    records = _personal_records(complete, zone)
+    records = _personal_records([r for r in complete if r['complete']], zone)
     running = self._worker is not None and self._worker.is_alive()
     pending = max(self._pending, int(not self._scanned))
     state = ('analyzing' if running else 'waitingParked' if pending and not self._allowed() else
@@ -540,6 +548,7 @@ class DriveStatsOwner:
                          'scanIncomplete': self._scan_incomplete, 'scanned': self._scanned,
                          'cachedRoutes': len(self._records), 'completeRoutes': sum(r['complete'] for r in self._records.values()),
                          'incompleteRoutes': sum(not r['complete'] for r in self._records.values()),
+                         'partialRoutes': sum(r.get('partial') is True for r in self._records.values()),
                          'ignoredRoutes': sum(r['ignored'] for r in self._records.values()),
                          'truncated': self._truncated, 'cacheCorrupt': self._corrupt}}
 

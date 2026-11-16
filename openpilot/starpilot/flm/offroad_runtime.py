@@ -12,7 +12,7 @@ from openpilot.starpilot.flm.offroad_surface import RouteSurfaceEffects, STOP_RE
 
 
 def configuration_data(cp, ci, controller, params, *, manual_status):
-  from opendbc.car.vin import VIN_UNKNOWN, is_valid_vin
+  from openpilot.starpilot.flm.vehicle_identity import identity_keys, persistent_unit
   from openpilot.starpilot.flm.runtime_adapter_registry import (
     selected_descriptor,
     baseline_values,
@@ -24,8 +24,8 @@ def configuration_data(cp, ci, controller, params, *, manual_status):
   from openpilot.starpilot.lateral.torque_settings import DOCUMENT_KEY, LEGACY_KEYS, MAX_DOCUMENT_BYTES, parse_document, interpret_legacy
   from openpilot.starpilot.saved_source import read_saved
 
-  if manual_status != 'not_configured' or not is_valid_vin(str(cp.carVin)) or str(cp.carVin) == VIN_UNKNOWN:
-    raise ValueError('Known vehicle and no manual coordinates required')
+  if manual_status != 'not_configured':
+    raise ValueError('No manual coordinates required')
   descriptor = selected_descriptor(cp, ci, controller)
   if descriptor is None or descriptor.domain not in ('torque', 'torque_pid'):
     raise ValueError('Actual registered torque controller required')
@@ -41,6 +41,7 @@ def configuration_data(cp, ci, controller, params, *, manual_status):
         'SafeMode',
         'TurnAssist',
         *LEGACY_KEYS,
+        *identity_keys(cp),
       )
     )
   )
@@ -97,7 +98,8 @@ def configuration_data(cp, ci, controller, params, *, manual_status):
   if not 1 <= len(reset) <= 64 or reset.strip('0123456789abcdef'):
     raise ValueError('Invalid reset generation')
   # Settings identity only. It does not describe current physical calibration.
-  epoch = digest(('persistent_vehicle_source_v1', descriptor.cp_sha256, tuple((k, None if raw[k] is None else raw[k].hex()) for k in keys), str(cp.carVin)))
+  saved_settings = tuple((k, None if raw[k] is None else raw[k].hex()) for k in keys)
+  epoch = digest(('persistent_vehicle_source_v1', descriptor.cp_sha256, saved_settings, persistent_unit(cp, raw)))
   numeric = baseline_values(controller)
   scope = RouteScope(
     descriptor.cp_sha256, descriptor.controller_revision, baseline_revision(descriptor, numeric), epoch, reset, descriptor.controller_mode, descriptor.domain

@@ -17,6 +17,9 @@ const response = (body) => ({ ok: true, status: 200, json: async () => body })
 const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve() }
 
 assert.equal(validDriveStats(fixture), true)
+assert.equal(validDriveStats({ ...fixture, lastDrive: { ...route, complete: false, partial: true } }), true)
+assert.equal(validDriveStats({ ...fixture, lastDrive: { ...route, partial: true } }), false)
+assert.equal(validDriveStats({ ...fixture, lastDrive: { ...route, partial: "yes" } }), false)
 const aolRoute = { ...route, aolSeconds: 900, aolPercent: 25 }
 const aolTotals = { aolSeconds: 900, aolPercent: 25, aolDurationSeconds: 3600, aolDrives: 1 }
 const aolFixture = { ...fixture, lastDrive: aolRoute, recentDrives: [aolRoute],

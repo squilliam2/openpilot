@@ -9,7 +9,8 @@ import re
 import time
 
 from openpilot.starpilot.flm.log_decode import LogDecodeCancelled, decode_full_rlog_segment
-from openpilot.starpilot.galaxy.drive_history import DriveHistory, DriveHistoryUnavailable
+from openpilot.starpilot.galaxy.drive_history import DriveHistory, DriveHistoryUnavailable, MAX_STATS_SEGMENTS_PER_ROUTE
+from openpilot.starpilot.flm.local_logs import MAX_COMPRESSED_BYTES
 from openpilot.starpilot.galaxy.drive_analysis import _Incomplete, _selected, _route_names, _closed_source
 from openpilot.starpilot.saved_source import read_saved
 
@@ -28,8 +29,10 @@ RETAIN = frozenset(
     'sentinel',
   )
 )
-MAX_SEGMENTS = 180
-MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_SEGMENTS = MAX_STATS_SEGMENTS_PER_ROUTE
+# Sources are read one segment at a time. Match the admitted segment count and
+# per-file bound; a 355-minute route must not fail a separate 2 GiB limit.
+MAX_TOTAL_BYTES = MAX_SEGMENTS * MAX_COMPRESSED_BYTES
 # A 103-segment, 1.34 GB drive takes over 30 minutes on parked low-power cores.
 # Keep the full-drive checks and a finite one-hour ceiling; do not accept a prefix.
 MAX_ANALYSIS_SECONDS = 3600.0

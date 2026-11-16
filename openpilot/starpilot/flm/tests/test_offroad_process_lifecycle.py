@@ -86,7 +86,9 @@ assert 'opendbc.car.car_helpers' not in sys.modules
     with tempfile.TemporaryDirectory() as root:
       params = Params(root)
       params.put_bool('IsOffroad', starts_parked, block=True)
-      params.put(KEY, b'declared-existing-saved-tune')
+      # The shutdown fixture must already be durable before cancelling the
+      # worker; otherwise this tests the asynchronous Params writer's timing.
+      params.put(KEY, b'declared-existing-saved-tune', block=True)
       def close_socket(i):
         events.append(('closed', i))
         if cancel_on_cleanup and i == 0:

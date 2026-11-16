@@ -42,6 +42,33 @@ def analyzed(root, selected, permitted):
 
 
 class DriveStatsTest(unittest.TestCase):
+  def test_partial_stats_survive_restart_and_refresh_without_double_counting(self):
+    partial = dict(analyzed(self.root, route('abc'), lambda: True), complete=False, partial=True,
+                   reason='Recorded portion only; final segment unreadable')
+    calls = mock.Mock(return_value=partial)
+    owner = self.owner(analyzer=calls)
+    owner._run()
+    self.assertEqual(owner.snapshot()['totals']['distanceMeters'], 1000)
+    self.assertEqual(owner.snapshot()['coverage']['partialRoutes'], 1)
+    self.assertEqual(owner.snapshot()['records'], [])
+    self.assertEqual(owner.snapshot()['analysis']['failed'], 0)
+    owner._run()
+    calls.assert_called_once()
+    restarted = self.owner(analyzer=calls)
+    self.assertFalse(restarted.snapshot()['coverage']['cacheCorrupt'])
+    self.assertEqual(restarted.snapshot()['totals']['distanceMeters'], 1000)
+    # A repaired recording replaces this route's coverage, never adds a drive.
+    folder = self.root / 'abc--0'
+    folder.mkdir()
+    (folder / 'rlog.zst').write_bytes(b'changed source, analyzer is an explicit fixture')
+    calls.return_value = dict(partial, complete=True, partial=False, reason=None, distanceMeters=1200)
+    restarted._run()
+    self.assertEqual(restarted.snapshot()['totals']['distanceMeters'], 1200)
+    self.assertEqual(restarted.snapshot()['totals']['drives'], 1)
+    self.assertEqual(restarted.snapshot()['coverage']['partialRoutes'], 0)
+    restarted.ignore('abc', True, lambda: True)
+    self.assertEqual(restarted.snapshot()['totals']['drives'], 0)
+
   def test_past_week_is_seven_calendar_dates_and_excludes_old_future_ignored_and_incomplete(self):
     self.now[0] = datetime(2026, 11, 2, 12, tzinfo=UTC).timestamp()
     owner = self.owner(permitted=lambda: False)

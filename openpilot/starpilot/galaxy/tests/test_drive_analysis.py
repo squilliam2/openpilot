@@ -44,6 +44,56 @@ def selection(*segments):
 
 
 class DriveAnalysisTest(unittest.TestCase):
+  def test_dashboard_keeps_only_intact_prefix_and_strict_reader_still_refuses(self):
+    samples = [*self.sample(BASE, 10, True), *self.sample(BASE + 500_000_000, 10, True)]
+    first = write(self.root, 0, samples + [event('sentinel', BASE + 500_000_000, type='endOfSegment')], kind='qlog')
+    tail = write(self.root, 1, self.sample(BASE + 1_000_000_000, 10, True), kind='qlog')
+    path = self.root / tail['segmentName'] / 'qlog.zst'
+    path.write_bytes(path.read_bytes()[:-3])
+    route = selection(first, tail)
+    strict = analyze_route(self.root, route, permitted=lambda: True)
+    self.assertFalse(strict['complete'])
+    self.assertFalse(strict['partial'])
+    observed = drive_analysis.analyze_recorded_route(self.root, route, permitted=lambda: True)
+    self.assertFalse(observed['complete'])
+    self.assertTrue(observed['partial'], observed)
+    self.assertEqual(observed['distanceMeters'], 5)
+    self.assertEqual(observed['durationSeconds'], .5)
+    self.assertIn('final segment unreadable', observed['reason'])
+    # A damaged interior source must never bridge a gap into a partial result.
+    last = write(self.root, 2, self.sample(BASE + 1_500_000_000, 10, True), kind='qlog')
+    broken_middle = drive_analysis.analyze_recorded_route(self.root, selection(first, tail, last), permitted=lambda: True)
+    self.assertFalse(broken_middle['partial'])
+
+  def test_unclosed_but_intact_dashboard_coverage_is_labeled_and_cancel_never_succeeds(self):
+    segment = write(self.root, 0, [*self.sample(BASE, 10, True), *self.sample(BASE + 500_000_000, 10, True)])
+    selected = selection(segment)
+    observed = drive_analysis.analyze_recorded_route(self.root, selected, permitted=lambda: True)
+    self.assertTrue(observed['partial'])
+    self.assertFalse(observed['complete'])
+    cancelled = drive_analysis.analyze_recorded_route(self.root, selected, permitted=lambda: False)
+    self.assertFalse(cancelled['partial'])
+    self.assertFalse(cancelled['complete'])
+
+  def test_cancelled_tail_decode_is_not_mislabeled_as_damaged_tail(self):
+    first = write(self.root, 0, [*self.sample(BASE, 10, True), *self.sample(BASE + 500_000_000, 10, True)])
+    last = write(self.root, 1, self.sample(BASE + 1_000_000_000, 10, True))
+    decode = drive_analysis.decode_segment
+    calls = 0
+
+    def cancelled(*args, **kwargs):
+      nonlocal calls
+      calls += 1
+      if calls == 2:
+        raise drive_analysis.LogDecodeCancelled('declared transient cancellation')
+      return decode(*args, **kwargs)
+
+    with mock.patch.object(drive_analysis, 'decode_segment', side_effect=cancelled):
+      result = drive_analysis.analyze_recorded_route(self.root, selection(first, last), permitted=lambda: True)
+    self.assertFalse(result['partial'])
+    self.assertFalse(result['complete'])
+    self.assertIn('cancellation', result['reason'])
+
   def setUp(self):
     self.temp = tempfile.TemporaryDirectory()
     self.addCleanup(self.temp.cleanup)

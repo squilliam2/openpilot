@@ -91,8 +91,27 @@ class TestRouteFaultIsolation(unittest.TestCase):
       path.mkdir()
       (path / 'rlog.zst').write_bytes(b'not decoded by inventory')
       actual = route_inventory(root)
-      self.assertEqual([row['routeId'] for row in actual['routes']], [f'{n:08x}--aaaaaaaaaa' for n in (2, 3, 4)])
-      self.assertEqual(actual['routeErrors'][0]['routeId'], '00000001--aaaaaaaaaa')
+      self.assertEqual([row['segmentCount'] for row in actual['routes']], [181, 180, 152, 1])
+      self.assertEqual(actual['routeErrors'], [])
+
+  def test_355_segment_drive_is_selected_and_513_segment_drive_is_refused(self):
+    from openpilot.starpilot.flm.offroad_route import MAX_SEGMENTS
+
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory) / 'logs'
+      root.mkdir()
+      for number in range(MAX_SEGMENTS + 1):
+        path = root / f'00000001--aaaaaaaaaa--{number}'
+        path.mkdir()
+        (path / 'rlog.zst').write_bytes(b'metadata-only fixture, never decoded')
+        if number == 354:
+          params = Params(str(Path(directory) / 'params'))
+          params.put('CurrentRoute', '00000001--aaaaaaaaaa', block=True)
+          selected = latest_route(params, root, permitted=lambda: True)
+          self.assertEqual(selected['segmentCount'], 355)
+      inventory = route_inventory(root)
+      self.assertEqual(inventory['routes'], [])
+      self.assertIn('limit', inventory['routeErrors'][0]['reason'])
 
   def setup_worker(self, directory, latest):
     root = Path(directory)
