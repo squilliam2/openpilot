@@ -8,7 +8,7 @@ export const validLearningMode = value => value?.version === 1 && typeof value.a
 export const FlmLearningMode = {
   name: 'FlmLearningMode',
   props: { mode: { type: String, required: true }, unauthorized: { type: Function, required: true } },
-  data: () => ({ state: null, choice: 'parked', dirty: false, request: null, error: '', saved: false, alive: false }),
+  data: () => ({ state: null, choice: 'live', dirty: false, request: null, error: '', saved: false, alive: false }),
   mounted() {
     this.alive = true
     this.poller = new PollTimer({ read: () => this.load(), interval: 5000 })
@@ -40,18 +40,18 @@ export const FlmLearningMode = {
   },
   template: `<section class="gx-card gx-tuner__section gx-route-reviews">
     <h3>When Auto Learn runs</h3>
-    <p>Live mode collects and qualifies small FLM updates during a drive. Parked mode reviews completed drives for the next drive.</p>
+    <p>Live mode is the default: it qualifies small updates during a drive, then finishes fitting while parked. Offroad only reviews completed drives for the next drive.</p>
     <p v-if="error" role="alert">{{ error }}</p>
     <p v-if="!state?.available">Identify the vehicle to choose its learning mode.</p>
     <template v-else>
       <form @submit.prevent="save" class="gx-route-reviews__form">
-        <label>Learning mode<select v-model="choice" @change="dirty = true; saved = false" :disabled="!state.parked || !!request"><option value="parked">Parked analysis · next-drive tune</option><option value="live">Live FLM · experimental</option></select></label>
+        <label>Learning mode<select v-model="choice" @change="dirty = true; saved = false" :disabled="!state.parked || !!request"><option value="live">Live + parked finishing · default</option><option value="parked">Offroad only · next-drive tune</option></select></label>
         <button type="submit" class="gx-btn gx-btn--tonal" :disabled="!state.parked || !!request || !dirty">Save for next drive</button>
       </form>
       <p v-if="saved" role="status">Saved. This mode starts on the next drive.</p>
       <p v-if="!state.enabled" class="gx-tuner__caption">Auto Learn is off for this vehicle. Choosing a mode does not turn it on.</p>
       <p class="gx-tuner__caption">{{ state.identitySource === 'original_vin' ? 'Vehicle binding uses the original discovered VIN.' : 'Original VIN discovery returned unknown; the device-and-firmware fallback is used when available.' }}</p>
     </template>
-    <p class="gx-tuner__caption">Live updates still require fresh physical-response, controller and native checks. Driver override, missing evidence or a failed trial prevents or withdraws an update. The experimental live path still needs validation on your car.</p>
+    <p class="gx-tuner__caption">Parked results guide a new qualified live trial on the next drive. They do not confirm an interrupted experiment. Driver input excludes the affected interval and settling buffer; clean sections remain usable. Live updates require fresh controller/native evidence and still need validation on your car.</p>
   </section>`,
 }

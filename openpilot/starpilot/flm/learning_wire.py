@@ -215,7 +215,7 @@ def write_control(parent, evidence):
     'policy': _string(evidence.policy),
     'baselineRevision': evidence.baseline_revision,
     'baselineValues': evidence.baseline_values,
-    'controllerRevision': _string(evidence.controller_revision),
+    'controllerRevision': _string(evidence.controller_revision, 192),
     'replaySnapshot': _named_pairs(evidence.replay_snapshot),
     'replayInputs': _named_pairs(evidence.replay_inputs),
     'snapshotSequence': evidence.snapshot_sequence,
@@ -272,7 +272,8 @@ def _read_fields(row, schema):
   if type(row) is _DynamicStructReader and row.schema == schema:
     values = {name: row._get_by_field(field) for name, field in schema.fields.items()}
     return SimpleNamespace(
-      **{name: _evidence_field_name(value) if type(value) is str and 0 < len(value.encode()) <= 96 else value for name, value in values.items()}
+      **{name: _evidence_field_name(value) if type(value) is str and
+         0 < len(value.encode()) <= (192 if name == 'controllerRevision' else 96) else value for name, value in values.items()}
     )
   return row
 
@@ -297,6 +298,7 @@ def read_control(event):
   ):
     raise ValueError('control version or bound')
   row = _read_fields(row, custom.LearningControlEvidence.schema)
+  _string(str(row.controllerRevision), 192)
   stages, route_values, route_revision, route_scope, configured = decode_configuration(
     str(row.stageSchemaRevision), tuple(_shared_scalar_pair(str(v.name), float(v.value)) for v in row.stageValues)
   )

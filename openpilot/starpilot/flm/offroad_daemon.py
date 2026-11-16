@@ -107,8 +107,12 @@ class StatusReport:
       value = counts.get(key, 0)
       return value if type(value) is int and 0 <= value < 2**63 else 0
 
-    details: dict[str, Any] = {'Analysis runs while parked': value.get('learning_mode') != 'live',
+    details: dict[str, Any] = {'Analysis runs while parked': True,
                               'Next-drive trial is reversible': True, 'Physical road improvement proven': False}
+    if value.get('finishing'):
+      details['Live-drive fit finished while parked'] = value.get('finishing_completed') is True
+      details['Parked result needs fresh live qualification'] = True
+      details['Next-drive candidate'] = value.get('next_drive_candidate')
     if value.get('skipped_routes'):
       details['Skipped recorded drives'] = [list(row) for row in value['skipped_routes'][:16]]
     if value.get('partial_drive') is True:
@@ -340,6 +344,7 @@ def _run():
 
     cache = directory_for_params(params)
     worker = None
+    worker_mode = None
     next_analysis = 0.0
     while not stopped:
       if not params.get_bool('IsOffroad'):
@@ -375,11 +380,16 @@ def _run():
       elif parked() and time.monotonic() >= next_analysis:
         from openpilot.starpilot.flm.learning_mode import selected_mode
 
-        if selected_mode(params) == 'live':
-          report.set({'status': 'collecting', 'reason': 'live_learning_waiting_for_next_drive',
-                      'enabled': None, 'learning_mode': 'live'})
-          next_analysis = time.monotonic() + 10.
-          continue
+        mode = selected_mode(params)
+        if worker is not None and worker_mode != mode:
+          restart = True
+          break  # Changing modes must drop the previous fitter's image too.
+        if worker is None and mode == 'live':
+          from openpilot.starpilot.flm.live_parked_finish import LiveParkedFinisher
+          worker = LiveParkedFinisher(params, Paths.log_root(), cache, permitted=permitted,
+            on_analysis=lambda: report.analyzing({'status': 'fitting', 'reason': 'finishing_live_drive_while_parked',
+                                                 'learning_mode': 'live', 'finishing': True}))
+          worker_mode = mode
         if worker is None:
           from openpilot.starpilot.flm.offroad_worker import OffroadWorker
 
@@ -401,6 +411,7 @@ def _run():
             ),
             on_recommendations=lambda value: report.analyzing({**value, 'reason': 'checking_recorded_steering_recommendations'}),
           )
+          worker_mode = mode
           report.restore(worker.cache)
         next_analysis = time.monotonic() + 10.0
         if run_parked_analysis(worker, report):

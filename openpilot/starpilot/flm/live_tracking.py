@@ -523,6 +523,8 @@ class LiveTrackingOptimizer:
     self.source_recheck: SourceRecheck | None = None
     self.status, self.reason = 'collecting', 'qualified_tracking_episodes_required'
     self.model_status = 'unavailable'
+    self.parked_candidate = None
+    self.parked_probe_started_ns = 0
 
   def _hash(self, values: dict[str, float] | tuple[tuple[str, float], ...]) -> str:
     return full_profile_sha256(self.binding.baseline_revision, values)
@@ -709,9 +711,20 @@ class LiveTrackingOptimizer:
   def preferred_probe_group(self, now_ns: int) -> str | None:
     hint = self._current_selector(now_ns)
     state = self.offer_state
-    if hint is None or not (self.selector_pending or self.discovery is not None) or state is not None and not state['accepted']:
-      return None
-    return hint['group']
+    if hint is not None and (self.selector_pending or self.discovery is not None) and (state is None or state['accepted']):
+      return hint['group']
+    parked = self._parked_preference()
+    if parked is not None and self.discovery is None and (state is None or state['accepted']):
+      if not self.parked_probe_started_ns:
+        self.parked_probe_started_ns = now_ns
+      if 0 <= now_ns - self.parked_probe_started_ns <= 60_000_000_000:
+        return parked.group
+    return None
+
+  def _parked_preference(self):
+    from openpilot.starpilot.flm.live_parked_finish import ParkedCandidate
+    candidate = self.parked_candidate
+    return candidate if type(candidate) is ParkedCandidate and candidate.matches(self.binding, self.domain, self.accepted) else None
 
   def _fresh_selected_effect(self, rows: Sequence[TrackingEpisode], name: str, target: dict[str, float]) -> float | None:
     effects = []
@@ -1287,6 +1300,14 @@ class LiveTrackingOptimizer:
 
     least_rejected = min(map(rejected_count, choices))
     choices = [choice for choice in choices if rejected_count(choice) == least_rejected]
+    # Parked fitting only ranks ALREADY fresh-qualified choices. It cannot
+    # inject a target, substitute old baseline scores, reverse a fresh measured
+    # direction, extend a lease or skip independent future/rollback checks.
+    parked = self._parked_preference()
+    preferred = [] if parked is None else [choice for choice in choices if choice[2] == parked.name and
+                                          (choice[3][parked.name] - self.accepted[parked.name]) * parked.delta > 0]
+    if preferred:
+      choices = preferred
     _, group, name, target, rows, _, expected, allocation, input_anchor = max(
       choices, key=lambda value: (now_ns - self.ready_since[value[1]] >= TRIAL_TIMEOUT_NS, value[5], -self.ready_since[value[1]], value[1], value[2])
     )

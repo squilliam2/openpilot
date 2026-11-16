@@ -1063,7 +1063,7 @@ class GlobalRuntime:
       bool(self.source.manual or self.live_manual),
       active,
       bool(cs.canValid and not cs.canTimeout and self.healthy and self.eligible),
-      bool(cs.steeringPressed),
+      bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed),
       bool(cs.steerFaultTemporary or cs.steerFaultPermanent),
       bool(log.saturated),
       bool(limited or curvature_limited),

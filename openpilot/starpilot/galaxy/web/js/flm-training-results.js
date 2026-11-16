@@ -204,6 +204,11 @@ export const SURFACE_GROUPS = Object.freeze([
 ])
 
 const REASONS = {
+  finishing_live_drive_while_parked: "Finishing the live drive's fit while parked.",
+  parked_candidate_waiting_for_fresh_live_checks: "A next-drive candidate is queued. Fresh live checks and an independent trial are required before it can be accepted.",
+  parked_live_fit_needs_more_consistent_evidence: "Parked fitting finished without a consistent change supported by separate clean windows. Your accepted tune is unchanged.",
+  parked_live_current_controller_not_recorded: "This recording has no clean windows from the current controller setup. Record a drive on this build to finish live tuning.",
+  parked_live_current_accepted_profile_not_recorded: "The recording has no clean windows using the current accepted live values. More driving on those values is needed.",
   partial_drive_provisional_only: "Only intact, fully saved sections were reviewed. These suggestions will not change your tune automatically.",
   "candidate encoder clipping regression": "This change did not pass the steering-limit checks.",
   newer_drive_refused_same_adjustment: "A newer drive did not support this same adjustment. Auto Learn left the tune unchanged.",

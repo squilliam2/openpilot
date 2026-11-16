@@ -210,10 +210,11 @@ def _probe_group_coverage(rows, names, *, kind, direction):
 
 
 class LiveTrackingActor:
-  def __init__(self, bootstrap_process=None, *, probe_process=None, source_tracking=False):
+  def __init__(self, bootstrap_process=None, *, probe_process=None, source_tracking=False, parked_candidate=None):
     if type(source_tracking) is not bool or source_tracking and bootstrap_process is not None:
       raise ValueError('source tracking has no plant bootstrap process')
     self.source_tracking = source_tracking
+    self.parked_candidate = parked_candidate
     self.process = bootstrap_process
     from openpilot.starpilot.flm.live_tracking_bootstrap_producer import ResponseSnapshotProcess
 
@@ -323,6 +324,7 @@ class LiveTrackingActor:
       raise ValueError('bootstrap response belongs to another current source')
     accepted = tuple((name, 0.0) for name in NAMES) if accepted_full30 is None else accepted_full30
     self.ingress = LiveTrackingIngress(certificate.binding, certificate, accepted, controller_domain=collector.adapter.command_family)
+    self.ingress.optimizer.parked_candidate = self.parked_candidate
     self.certificate = certificate
     collector.adapter.replay.source_controller_revision = collector.adapter.controller_revision
     self.ingress.replay = collector.adapter.replay

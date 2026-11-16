@@ -39,6 +39,8 @@ class RecordedControlMetadata:
   stage_schema_revision: str = ''
   replay_inputs: tuple = ()
   route_configured_coordinates: tuple = ()
+  live_applied_coordinates: tuple = ()
+  unmodeled_effect: bool = False
 
 
 def _inhibited_inputs(row, schema):
@@ -93,6 +95,14 @@ def read_control_metadata(event):
     coordinates, route_revision, scope, configured = (), '', '', ()
   inputs = _inhibited_inputs(row, schema)
   configuration_values(coordinates, configured, inputs)
+  if len(row.appliedCoordinates) > 8 or any(not math.isfinite(float(v)) for v in row.appliedCoordinates):
+    raise ValueError('Original selected-coordinate bound')
+  live = tuple(float(v) for v in row.liveAppliedCoordinates)
+  if live:
+    from openpilot.starpilot.flm.canonical_surface_adapter import NAMES, full_profile_sha256
+    if len(live) != len(NAMES) or route_revision:
+      raise ValueError('Distinct original live-coordinate metadata required')
+    full_profile_sha256(baseline, tuple(zip(NAMES, live, strict=True)))
   return RecordedControlMetadata(
     int(row.controlMonoTime),
     int(row.sourceStateMonoTime),
@@ -120,4 +130,6 @@ def read_control_metadata(event):
     stage_schema_revision=schema,
     replay_inputs=inputs,
     route_configured_coordinates=configured,
+    live_applied_coordinates=live,
+    unmodeled_effect=bool(row.effectTrace.version or any(float(v) != 0.0 for v in row.appliedCoordinates)),
   )

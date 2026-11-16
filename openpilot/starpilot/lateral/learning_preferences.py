@@ -103,7 +103,10 @@ def replace_preference(raw: bytes | None, CP, enabled: bool) -> bytes:
 
 def learning_mode(raw, CP):
   brand, fingerprint = _identity(CP)
-  return _decode(raw).get('modes', {}).get(brand, {}).get(fingerprint, 'parked')
+  document = _decode(raw)
+  supported = (str(getattr(CP, 'steerControlType', '')) == 'torque' and
+               not any(getattr(CP, key, True) for key in ('notCar', 'passive', 'dashcamOnly')))
+  return document.get('modes', {}).get(brand, {}).get(fingerprint, 'live' if supported else 'parked')
 
 
 def read_learning_mode(params, CP):
@@ -118,16 +121,8 @@ def replace_learning_mode(raw, CP, mode):
     raise ValueError('Choose parked or live learning')
   brand, fingerprint = _identity(CP)
   document = _decode(raw)
-  if mode == 'live':
-    document.setdefault('modes', {}).setdefault(brand, {})[fingerprint] = mode
-  else:
-    modes = document.get('modes', {})
-    vehicles = modes.get(brand, {})
-    vehicles.pop(fingerprint, None)
-    if not vehicles:
-      modes.pop(brand, None)
-    if not modes:
-      document.pop('modes', None)
+  # Both choices are explicit: an offroad-only choice must survive the default.
+  document.setdefault('modes', {}).setdefault(brand, {})[fingerprint] = mode
   encoded = json.dumps(document, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
   _decode(encoded)
   return encoded

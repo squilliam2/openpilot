@@ -130,7 +130,7 @@ def read_point(event, companions, *, route, segment, context_key):
     int(companions['carControl'].logMonoTime),
     int(output.logMonoTime) if output_current else 0,
     bool(value.active and cc.latActive),
-    bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking),
+    bool(cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed),
     bool(value.saturated),
     bool(cs.canValid and not cs.canTimeout and not cs.steerFaultTemporary and not cs.steerFaultPermanent),
   )

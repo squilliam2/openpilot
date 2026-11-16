@@ -108,6 +108,19 @@ def row_with_fields():
   )
 
 
+def test_upstream_steering_compatibility_revision_round_trip_is_bounded():
+  revision = 'selected-steering-compatibility-v1:' + 'a' * 64
+  assert 96 < len(revision) <= 192
+  row = replace(row_with_fields(), controller_revision=revision)
+  event = packet(wire.write_control, row)
+  assert wire.read_control(messaging.log_from_bytes(event.to_bytes())).controller_revision == revision
+  with pytest.raises(ValueError, match='bounded string'):
+    packet(wire.write_control, replace(row, controller_revision='x' * 193))
+  event.starpilotLateralState.learningEvidence.controllerRevision = 'x' * 193
+  with pytest.raises(ValueError, match='bounded string'):
+    wire.read_control(event.as_reader())
+
+
 @pytest.mark.parametrize(
   'field',
   [

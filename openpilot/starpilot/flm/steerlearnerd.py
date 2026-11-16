@@ -1113,6 +1113,7 @@ def main(*, stopped=None):
   from openpilot.starpilot.flm.live_tracking_actor import LiveTrackingActor
   from openpilot.starpilot.flm.live_tracking_probe_process import ProbeProcess
   from openpilot.starpilot.flm.live_trial_store import LiveTrialPersistence, load_confirmed_history
+  from openpilot.starpilot.flm.live_parked_finish import load_candidate
 
   try:
     if hasattr(os, 'sched_setscheduler'):
@@ -1224,7 +1225,7 @@ def main(*, stopped=None):
       adapter_for_ford,
       reporter=reporter,
       publication_source_reader=publication_source_reader,
-      live_actor=LiveTrackingActor(probe_process=ProbeProcess(),source_tracking=True),
+      live_actor=LiveTrackingActor(probe_process=ProbeProcess(), source_tracking=True, parked_candidate=load_candidate(params)),
       live_persistence=LiveTrialPersistence(params),
       confirmed_history=load_confirmed_history(params),
       stopped=stopped,

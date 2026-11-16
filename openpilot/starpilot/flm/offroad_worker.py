@@ -119,6 +119,8 @@ def recorded_source_contract(cp, metadata, scope, params):
 
 
 def _recorded_values(metadata):
+  if metadata.get('live_coordinates') or metadata.get('unmodeled_effect'):
+    return None  # Canonical live effects are not relative parked route maps.
   pairs = metadata['route_values']
   if not pairs:
     return dict(ZERO) if not metadata['route_revision'] else None

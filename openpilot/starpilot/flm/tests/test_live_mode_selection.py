@@ -22,18 +22,18 @@ def vehicle(vin='JTMAB3FV0MD000001'):
 def test_mode_defaults_and_off_choice_remains_independent(tmp_path):
   params = Params(str(tmp_path / 'params'))
   cp = vehicle()
-  assert learning_mode(None, cp) == 'parked'
+  assert learning_mode(None, cp) == 'live'
   raw = replace_learning_mode(replace_preference(None, cp, False), cp, 'live')
   params.put(KEY, raw, block=True)
   assert learning_mode(raw, cp) == 'live'
   assert not read_preference(params, cp).enabled
   assert learning_mode(replace_preference(raw, cp, True), cp) == 'live'
   restored = replace_learning_mode(raw, cp, 'parked')
-  assert learning_mode(restored, cp) == 'parked' and b'"modes"' not in restored
+  assert learning_mode(restored, cp) == 'parked' and b'"parked"' in restored
   assert learning_mode(raw, vehicle('JTMAB3FV0MD000002')) == 'live'  # Mode is a user choice for the platform, not a tune identity.
   other = cp.as_reader().as_builder()
   other.carFingerprint = 'ANOTHER_DECLARED_VEHICLE'
-  assert learning_mode(raw, other) == 'parked'
+  assert learning_mode(raw, other) == 'live'
   with pytest.raises(ValueError):
     replace_learning_mode(raw, cp, 'anything')
 
@@ -63,7 +63,7 @@ def test_parked_mode_change_is_vehicle_bound_cas_and_preserves_identity(tmp_path
   allowed = [True]
   owner = LearningMode(params, parked=lambda: allowed[0])
   before = owner.snapshot()
-  assert before['mode'] == 'parked' and before['identitySource'] == 'original_vin'
+  assert before['mode'] == 'live' and before['identitySource'] == 'original_vin'
   with pytest.raises(PermissionError):
     owner.select('live', before['revision'], authorized=lambda: False)
   after = owner.select('live', before['revision'], authorized=lambda: True)

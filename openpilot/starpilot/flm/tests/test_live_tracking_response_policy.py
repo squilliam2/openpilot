@@ -109,7 +109,10 @@ def test_daemon_explicitly_constructs_production_response_process():
   assert len(calls) == 1
   keywords = {item.arg: item.value for item in calls[0].keywords}
   assert not calls[0].args
-  assert set(keywords) == {'probe_process', 'source_tracking'}
+  assert set(keywords) == {'probe_process', 'source_tracking', 'parked_candidate'}
+  assert isinstance(keywords['parked_candidate'], ast.Call)
+  assert isinstance(keywords['parked_candidate'].func, ast.Name)
+  assert keywords['parked_candidate'].func.id == 'load_candidate'
   assert isinstance(keywords['source_tracking'], ast.Constant)
   assert keywords['source_tracking'].value is True
   from openpilot.starpilot.flm.live_tracking_actor import LiveTrackingActor

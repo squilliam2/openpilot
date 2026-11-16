@@ -215,6 +215,7 @@ class RecordedInputs:
 
 def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segments=False):
   from openpilot.starpilot.flm.offroad_control_metadata import read_control_metadata as read_control
+  from openpilot.starpilot.flm.driver_exclusions import DriverExclusions
 
   state = {'cp': None, 'cp_sha': None, 'context': None}
   windows = {}
@@ -240,11 +241,12 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
     'whole_control_window_refusals': 0,
   }
   quality_stops = []
+  driver_inputs = DriverExclusions()
 
   def metadata_for(control, domain):
     from openpilot.starpilot.flm.route_recording import configuration_values
 
-    return {
+    metadata = {
       'cp_sha256': state['cp_sha'],
       'controller_mode': control.controller_mode,
       'controller_revision': control.controller_revision,
@@ -258,6 +260,12 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
         getattr(control, 'route_applied_coordinates', ()), getattr(control, 'route_configured_coordinates', ()), getattr(control, 'replay_inputs', ()),
       ),
     }
+    live = getattr(control, 'live_applied_coordinates', ())
+    if live:
+      metadata['live_coordinates'] = live
+    if getattr(control, 'unmodeled_effect', False):
+      metadata['unmodeled_effect'] = True
+    return metadata
 
   def consume(segment, events):
     if isolate_segments:
@@ -272,6 +280,10 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
       if index % 128 == 0 and not permitted():
         raise ValueError('Parked analysis cancelled')
       kind = event.which()
+      if kind == 'carState':
+        cs = event.carState
+        if cs.steeringPressed or cs.brakePressed or cs.regenBraking or cs.gasPressed:
+          driver_inputs.observe(int(event.logMonoTime))
       if kind == 'carControl':
         counts['recorded_lateral_request_rows'] += 1
         counts['active_lateral_request_rows'] += bool(event.carControl.latActive)
@@ -291,7 +303,10 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
         if event.valid and event.starpilotLateralState.learningEvidence.version == 1:
           try:
             control = read_control(event)
-            state['context'] = (control.controller_mode, control.controller_revision, control.baseline_revision)
+            if control.override:
+              driver_inputs.observe(control.control_ns)
+            state['context'] = (control.controller_mode, control.controller_revision, control.baseline_revision,
+                                control.live_applied_coordinates, control.unmodeled_effect)
             controls.append(control)
             timeline[-1] = (int(event.logMonoTime), control)
             counts['original_control_metadata_rows'] += 1
@@ -405,6 +420,29 @@ def collect_route_inputs(root, route, *, permitted, walker=None, isolate_segment
       raise ValueError('Whole-drive tracking window bound exceeded')
 
   receipt = (walk_completed_route if walker is None else walker)(root, route, permitted=permitted, consume=consume)
+  # This final pass sees original input rows even when a tracking join was
+  # missing, and sees the NEXT segment before approving the prior bookend.
+  # Only overlapping analysis windows are removed; other sections survive.
+  driver_inputs.finish()
+  removed = set()
+  if driver_inputs.intervals:
+    for table in (windows, stable_windows, baseline_tracking, raw_windows):
+      for context in tuple(table):
+        retained = []
+        for window in table[context]:
+          if driver_inputs.overlaps(window.points[0].mono_ns, window.points[-1].mono_ns):
+            removed.add(window.identity)
+          else:
+            retained.append(window)
+        if retained:
+          table[context] = retained
+        else:
+          del table[context]
+    for sources in observed.values():
+      for source in sources:
+        source['windows'] = [w for w in source['windows'] if not driver_inputs.overlaps(w['start_ns'], w['end_ns'])]
+  counts['driver_input_intervals'] = len(driver_inputs.intervals)
+  counts['driver_input_excluded_windows'] = len(removed)
   counts['original_segments_reviewed'] = len(getattr(receipt, 'decoded_segments', receipt.segments))
   counts['original_segments_available'] = len(receipt.segments)
   return RecordedInputs(receipt, state, windows, stable_windows, baseline_tracking, bookends, raw_windows, context_metadata, counts, quality_stops, observed)
