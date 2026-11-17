@@ -585,7 +585,7 @@ class LiveTrackingActor:
       # Fork freezes the genuine source prefix without copying its nested
       # checkpoint graph on the ingestion loop. The original worker still
       # recomputes the complete controller/native evidence independently.
-      from openpilot.starpilot.flm.live_tracking_probe_process import original_probe_context, prepare_probe_payloads
+      from openpilot.starpilot.flm.live_tracking_probe_process import original_probe_context, prepare_probe_payloads, NUMERICAL_DEADLINE_NS
 
       expected = original_probe_context(selected, accepted, self.certificate.binding, source, group=group, names=names, now_ns=now_ns,
                                          source_experiment_step=source_experiment_step)
@@ -637,7 +637,7 @@ class LiveTrackingActor:
         # second Python startup and streaming it through another pipe.
         prepared = prepare_probe_payloads(tuple(jobs), queued_ns=now_ns, expected=expected)
         started_ns = time.monotonic_ns()
-        if not now_ns <= started_ns <= now_ns + 2_000_000_000:
+        if not now_ns <= started_ns <= now_ns + NUMERICAL_DEADLINE_NS:
           raise ValueError('original numerical input deadline expired')
         numeric = evaluate_job(json.loads(prepared['wire']), now_ns=started_ns)
         if len(json.dumps(numeric, separators=(',', ':'), allow_nan=False).encode()) > MAX_OUTPUT:

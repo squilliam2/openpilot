@@ -3,11 +3,14 @@ from copy import deepcopy
 import hashlib
 import json
 from unittest import TestCase
+from unittest.mock import patch
+
+import pytest
 
 from openpilot.starpilot.flm.controller_replay import pack_primitive_snapshot
 from openpilot.starpilot.flm.live_tracking_probe import _primitive
 from openpilot.starpilot.flm.live_tracking_probe_process import (
-  VERSION, _prepared_context, decode_probe_job, prepare_probe_payloads, prepare_probe_wire,
+  NUMERICAL_DEADLINE_NS, ProbeProcess, VERSION, _prepared_context, decode_probe_job, prepare_probe_payloads, prepare_probe_wire,
 )
 
 
@@ -64,3 +67,38 @@ class ProbeBatchPreparationTest(TestCase):
         prepare_probe_payloads(changed, queued_ns=11_000_000_000, expected=context)
     with self.assertRaises(ValueError):
       prepare_probe_payloads(rows, queued_ns=11_000_000_000, expected={'batch': ()})
+
+
+@pytest.mark.parametrize('elapsed', [2_000_000_001, 7_000_000_000, NUMERICAL_DEADLINE_NS])
+def test_preparation_can_finish_after_two_seconds_without_renewing_the_numerical_deadline(elapsed):
+  # Deliberately transport-only: accepting this envelope does not qualify a
+  # native replay or a live offer. The independent worker still must do that.
+  context = _prepared_context({'batch': payloads()})
+  prepared = prepare_probe_payloads(payloads(), queued_ns=11_000_000_000, expected=context)
+  process = ProbeProcess()
+  with patch('openpilot.starpilot.flm.fit_process.FitProcess.submit_bytes', return_value=True) as submit:
+    assert process.submit_prepared_probe(prepared, expected=context, token=('original',), now_ns=11_000_000_000 + elapsed)
+  submit.assert_called_once()
+  assert process.started_ns == 11_000_000_000
+  assert process.wall_ns == NUMERICAL_DEADLINE_NS
+  assert process.expected is not None
+  assert process.expected[1] == context
+
+
+@pytest.mark.parametrize('elapsed', [-1, NUMERICAL_DEADLINE_NS + 1])
+def test_preparation_cannot_submit_before_original_enqueue_or_after_original_deadline(elapsed):
+  context = _prepared_context({'batch': payloads()})
+  prepared = prepare_probe_payloads(payloads(), queued_ns=11_000_000_000, expected=context)
+  with patch('openpilot.starpilot.flm.fit_process.FitProcess.submit_bytes') as submit:
+    assert not ProbeProcess().submit_prepared_probe(prepared, expected=context, token=(), now_ns=11_000_000_000 + elapsed)
+  submit.assert_not_called()
+
+
+def test_delayed_preparation_still_rejects_changed_parent_source_context():
+  context = _prepared_context({'batch': payloads()})
+  prepared = prepare_probe_payloads(payloads(), queued_ns=11_000_000_000, expected=context)
+  changed = deepcopy(context)
+  changed['batch'][0]['binding'] = {'identity': 'different'}
+  with patch('openpilot.starpilot.flm.fit_process.FitProcess.submit_bytes') as submit, pytest.raises(ValueError, match='original context'):
+    ProbeProcess().submit_prepared_probe(prepared, expected=changed, token=(), now_ns=18_000_000_000)
+  submit.assert_not_called()

@@ -1,4 +1,10 @@
 import hashlib
+import json
+import os
+from pathlib import Path
+import select
+import signal
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -194,3 +200,219 @@ def test_local_inventory_spool_is_removed_when_identity_validation_fails(tmp_pat
   with pytest.raises(ReviewUnavailable, match='identity changed'):
     worker._rows(route_id, route)
   assert not list(worker.store.glob('.connect-inventory-*'))
+
+
+LOCAL_ROUTE = '00000001--aaaaaaaaaa'
+
+
+def local_section(root, number, payload=None, *, locked=False):
+  folder = root / f'{LOCAL_ROUTE}--{number}'
+  folder.mkdir(parents=True, exist_ok=True)
+  if payload is not None:
+    (folder / 'rlog.zst').write_bytes(payload)
+  if locked:
+    (folder / 'rlog.lock').touch()
+  return folder
+
+
+def local_worker(tmp_path, calls, *, now=None, allowed=lambda: True, batch=4):
+  def analyze(path, codec, *, number, route_id, expected_device, permitted):
+    assert expected_device is None and route_id == LOCAL_ROUTE and permitted()
+    calls.append(number)
+    result = report(path, codec, number=number, route_id=route_id, expected_device=DEVICE, permitted=permitted)
+    return result
+  return StreamRouteReview(tmp_path / 'cache', permitted=allowed, log_root=tmp_path / 'logs',
+                           analyze=analyze, batch_segments=batch, clock=lambda: 100. if now is None else now[0])
+
+
+def run_local(worker, **kwargs):
+  return worker.run(LOCAL_ROUTE, route=worker.local_routes()[LOCAL_ROUTE], **kwargs)
+
+
+def test_local_restart_append_and_unrelated_qlog_writes_keep_committed_sections(tmp_path):
+  root, calls = tmp_path / 'logs', []
+  first = local_section(root, 0, b'original-zero')
+  local_section(root, 1, b'original-one')
+  worker = local_worker(tmp_path, calls, batch=1)
+  assert run_local(worker)['reviewedCount'] == 1
+  # Shutdown/reboot recreates all Python owners; its SQLite checkpoint remains.
+  worker = local_worker(tmp_path, calls, batch=1)
+  assert run_local(worker)['reviewedCount'] == 2
+  (first / 'qlog.zst').write_bytes(b'independent sparse upload')
+  local_section(root, 2, b'original-two')
+  final = run_local(worker)
+  assert final['wholeRouteReviewed'] and final['reviewedCount'] == 3
+  assert calls == [0, 1, 2]
+  assert final['counts']['trackingFrames'] == 3 * 201
+
+
+def test_local_one_file_repair_replaces_only_its_derived_metrics_and_source_digest(tmp_path):
+  root, calls = tmp_path / 'logs', []
+  paths = [local_section(root, number, f'original-{number}'.encode()) for number in range(3)]
+  worker = local_worker(tmp_path, calls)
+  before = run_local(worker)
+  (paths[1] / 'rlog.zst').write_bytes(b'repaired-longer-original-one')
+  after = run_local(local_worker(tmp_path, calls))
+  assert calls == [0, 1, 2, 1]
+  assert after['wholeRouteReviewed'] and after['reviewedCount'] == 3
+  assert after['metrics'][0]['windows'] == 3 and after['counts']['trackingFrames'] == 3 * 201
+  assert before['sourceSha256'] != after['sourceSha256']
+  fresh = StreamRouteReview(tmp_path / 'fresh', permitted=lambda: True, log_root=root, analyze=worker.analyze)
+  assert run_local(fresh)['sourceSha256'] == after['sourceSha256'], 'Scheduling order is not original source identity'
+
+
+@pytest.mark.parametrize('tail', ['locked', 'empty', 'missing'])
+def test_local_open_or_empty_section_does_not_block_other_intact_sources_or_restart(tmp_path, tail):
+  root, calls, now = tmp_path / 'logs', [], [100.]
+  local_section(root, 0, b'intact-zero')
+  blocked = local_section(root, 1, b'incomplete' if tail == 'locked' else b'' if tail == 'empty' else None,
+                          locked=tail == 'locked')
+  local_section(root, 2, b'intact-two')
+  originals = {path.name: path.read_bytes() for path in blocked.iterdir()}
+  result = run_local(local_worker(tmp_path, calls, now=now))
+  assert calls == [0, 2] and result['reviewedCount'] == 2
+  assert result['deferredSegments'] == 1 and not result['allSegmentsAttempted']
+  now[0] = 159.
+  assert run_local(local_worker(tmp_path, calls, now=now))['deferredSegments'] == 1
+  now[0] = 160.
+  final = run_local(local_worker(tmp_path, calls, now=now))
+  assert calls == [0, 2] and final['allSegmentsAttempted'] and not final['wholeRouteReviewed']
+  assert final['reviewedCount'] == 2 and final['omittedCount'] == 1
+  assert final['omittedSegments'][0][0] == 1
+  assert {path.name: path.read_bytes() for path in blocked.iterdir()} == originals
+  # A genuine recorder repair makes only that original section eligible again.
+  if (blocked / 'rlog.lock').exists():
+    (blocked / 'rlog.lock').unlink()
+  (blocked / 'rlog.zst').write_bytes(b'now-independently-closed-one')
+  repaired = run_local(local_worker(tmp_path, calls, now=now))
+  assert calls == [0, 2, 1] and repaired['wholeRouteReviewed'] and repaired['omittedCount'] == 0
+  assert repaired['metrics'][0]['windows'] == 3
+
+
+def test_local_clock_rollback_cannot_prematurely_omit_an_unfinished_section(tmp_path):
+  calls, now = [], [100.]
+  local_section(tmp_path / 'logs', 0, locked=True)
+  assert run_local(local_worker(tmp_path, calls, now=now))['deferredSegments'] == 1
+  now[0] = 10.
+  assert run_local(local_worker(tmp_path, calls, now=now))['deferredSegments'] == 1
+  now[0] = 69.
+  assert run_local(local_worker(tmp_path, calls, now=now))['attemptedSegments'] == 0
+  now[0] = 70.
+  assert run_local(local_worker(tmp_path, calls, now=now))['omittedCount'] == 1
+  assert calls == []
+
+
+def test_local_permission_loss_keeps_each_committed_section_and_restarts_at_next_source(tmp_path):
+  calls, allowed = [], [True]
+  for number in range(3):
+    local_section(tmp_path / 'logs', number, f'original-{number}'.encode())
+  worker = local_worker(tmp_path, calls, allowed=lambda: allowed[0])
+  result = run_local(worker, on_progress=lambda value: allowed.__setitem__(0, False))
+  assert result['reviewedCount'] == 1 and calls == [0]
+  allowed[0] = True
+  final = run_local(local_worker(tmp_path, calls, allowed=lambda: allowed[0]))
+  assert final['wholeRouteReviewed'] and calls == [0, 1, 2]
+
+
+def test_local_changed_representative_reconsiders_a_prior_duplicate_omission(tmp_path):
+  root, calls = tmp_path / 'logs', []
+  first = local_section(root, 0, b'copied-original')
+  local_section(root, 1, b'copied-original')
+  worker = local_worker(tmp_path, calls)
+  before = run_local(worker)
+  assert before['reviewedCount'] == before['omittedCount'] == 1 and calls == [0]
+  (first / 'rlog.zst').write_bytes(b'new-distinct-original-zero')
+  after = run_local(worker)
+  assert after['wholeRouteReviewed'] and after['reviewedCount'] == 2
+  assert after['omittedCount'] == 0 and calls == [0, 0, 1]
+
+
+def test_exclusive_cache_owner_survives_process_kill_and_reclaims_only_owned_orphan_spools(tmp_path):
+  cache = tmp_path / 'cache'
+  calls = []
+
+  def analyze(path, codec, **kwargs):
+    calls.append(kwargs['number'])
+    return report(path, codec, **kwargs)
+
+  def make(inventory=None):
+    return StreamRouteReview(cache, permitted=lambda: True, batch_segments=1,
+                             inventory_fetch=inventory or (lambda identity: fixture_rows(2)),
+                             download=lambda row, path, permitted: path.write_bytes(str(row['number']).encode()), analyze=analyze)
+
+  worker = make()
+  assert worker.run(IDENTITY)['reviewedCount'] == 1 and calls == [0]
+  protected = {cache / 'compiled-response.bin': b'native artifact', cache / ('b' * 64 + '-comparison.sqlite3'): b'durable comparison',
+               cache / '.connect-inventory-unrecognized.sqlite3': b'not a recognized temporary spool'}
+  for path, value in protected.items():
+    path.write_bytes(value)
+  unexpected = cache / 'section-keepkeep'
+  unexpected.mkdir(mode=0o700)
+  (unexpected / 'proof.json').write_bytes(b'unexpected content must not be retired')
+  outside = tmp_path / 'original-recordings'
+  outside.mkdir()
+  original = outside / 'rlog.zst'
+  original.write_bytes(b'original recorder content must never change')
+  directory_link = cache / 'section-linklink'
+  directory_link.symlink_to(outside, target_is_directory=True)
+  inventory_link = cache / '.connect-inventory-linklink.sqlite3'
+  inventory_link.symlink_to(original)
+  incoming, outgoing = os.pipe()
+  child = os.fork()
+  if child == 0:
+    os.close(incoming)
+    try:
+      with worker._exclusive_run():
+        section = Path(tempfile.mkdtemp(prefix='section-', dir=cache))
+        (section / 'rlog.zst').write_bytes(b'partially downloaded data')
+        fd, inventory = tempfile.mkstemp(prefix='.connect-inventory-', suffix='.sqlite3', dir=cache)
+        os.write(fd, b'private signed inventory')
+        os.close(fd)
+        journal = inventory + '-journal'
+        fd = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(fd, b'partially committed inventory journal')
+        os.close(fd)
+        os.write(outgoing, json.dumps({'section': section.name, 'inventory': Path(inventory).name,
+                                      'journal': Path(journal).name}).encode())
+        os.kill(os.getpid(), signal.SIGSTOP)
+    except BaseException:
+      os._exit(2)
+    os._exit(0)
+  os.close(outgoing)
+  try:
+    assert select.select([incoming], [], [], 5)[0], 'The real owner must acquire its file lock before the contention check'
+    names = json.loads(os.read(incoming, 4096))
+    assert (cache / names['section'] / 'rlog.zst').read_bytes() == b'partially downloaded data'
+    inventory_called = []
+    contender = make(inventory=lambda identity: inventory_called.append(True) or fixture_rows(2))
+    with pytest.raises(RetryableReview, match='Another route analysis'):
+      contender.run(IDENTITY)
+    assert not inventory_called, 'Lock acquisition must precede downloads or credential-bearing inventory creation'
+    assert all((cache / name).exists() for name in names.values()), 'An active owner retains all of its temporary files'
+  finally:
+    os.close(incoming)
+    os.kill(child, signal.SIGKILL)
+    os.waitpid(child, 0)
+  # A process-level interruption releases the kernel lock, but leaves disk
+  # spools. Restart retires those exact cache entries before resuming section1.
+  final = make().run(IDENTITY)
+  assert final['wholeRouteReviewed'] and final['reviewedCount'] == 2 and calls == [0, 1]
+  assert final['metrics'][0]['windows'] == 2
+  assert all(not (cache / name).exists() for name in names.values())
+  assert all(path.read_bytes() == value for path, value in protected.items())
+  assert (unexpected / 'proof.json').read_bytes() == b'unexpected content must not be retired'
+  assert directory_link.is_symlink() and inventory_link.is_symlink()
+  assert original.read_bytes() == b'original recorder content must never change'
+
+
+def test_cache_permissions_are_rechecked_before_reclaim_or_inventory_fetch(tmp_path):
+  called = []
+  worker = StreamRouteReview(tmp_path / 'cache', permitted=lambda: True,
+                             inventory_fetch=lambda identity: called.append(True) or fixture_rows(1))
+  worker.store.chmod(0o755)
+  try:
+    with pytest.raises(ReviewUnavailable, match='ownership changed'):
+      worker.run(IDENTITY)
+    assert not called
+  finally:
+    worker.store.chmod(0o700)

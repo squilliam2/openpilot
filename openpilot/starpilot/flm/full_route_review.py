@@ -11,6 +11,7 @@ from openpilot.starpilot.flm.log_decode import decode_full_rlog_segment
 
 MAX_BYTES = 32 * 1024 * 1024
 MAX_OUTPUT = 1024 * 1024
+ANALYSIS_REVISION = 2
 
 
 def _digest(value):
@@ -119,7 +120,7 @@ def analyze_segment(path, codec, *, number, route_id, expected_device=None, perm
   if not permitted() or _revision(source.stat()) != before:
     raise InterruptedError('Original segment changed or review paused')
   counts.update(inputs.counts)
-  return {'version': 1, 'segment': number, 'routeId': route_id, 'sourceSha256': sha,
+  return {'version': 1, 'analysisRevision': ANALYSIS_REVISION, 'segment': number, 'routeId': route_id, 'sourceSha256': sha,
           'vehicleIdentity': _identity(cp, source_device), 'vehicles': [vehicle] if vehicle else [],
           'knownVinRecorded': known_vin, 'counts': counts, 'metrics': metrics,
           'proposalGroups': proposals, 'nativeQualified': False, 'actualApplicationProven': False,
@@ -128,6 +129,7 @@ def analyze_segment(path, codec, *, number, route_id, expected_device=None, perm
 
 
 def _proposal_groups(windows, previous, configuration, analyze, cohort, permitted, *, metadata, baseline_known):
+  from openpilot.starpilot.flm.route_window_transport import pack_window
   by_cohort = {}
   for window in windows:
     name = cohort(window)
@@ -141,6 +143,8 @@ def _proposal_groups(windows, previous, configuration, analyze, cohort, permitte
                for candidate in candidates if candidate is not None]
     output.append({'configurationHash': configuration, 'cohort': row['cohort'],
                    'windows': len(by_cohort.get(row['cohort'], ())), 'proposals': changes,
+                   'trackingWindows': [pack_window(window) for window in by_cohort.get(row['cohort'], ())],
+                   'previousCoordinates': previous, 'sectionReason': row['reason'],
                    'metadataRecorded': metadata is not None, 'originalMetadata': metadata,
                    'originalBaselineKnown': baseline_known, 'nativeQualified': False})
   return output

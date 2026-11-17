@@ -98,6 +98,18 @@ def test_analysis_only_or_rejected_heldout_evidence_never_queues_a_tune(tmp_path
   assert params.get('AutomaticSteeringProfiles') is None and params.get('AutomaticSteeringLiveTrials') is None
 
 
+def test_explicit_analysis_only_revalidation_retires_an_unoffered_previous_candidate(tmp_path, monkeypatch):
+  params, _, owner, _ = pipeline(tmp_path, monkeypatch, count=8)
+  owner.request('connect', ROUTE, authorized=lambda: True, purpose='tune')
+  assert finish(owner)['status'] == 'ready'
+  assert [job['state'] for job in import_snapshot(params)] == ['waiting_for_vehicle']
+  owner.request('connect', ROUTE, authorized=lambda: True, purpose='review')
+  assert [job['state'] for job in import_snapshot(params)] == ['stale_scope']
+  assert finish(owner)['summary']['analysisOnly']
+  assert all(job['state'] == 'stale_scope' for job in import_snapshot(params))
+  assert params.get('AutomaticSteeringProfiles') is None and params.get('AutomaticSteeringLiveTrials') is None
+
+
 def test_http_new_purpose_and_legacy_body_keep_authentication_and_origin_checks(tmp_path):
   queued = []
 

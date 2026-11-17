@@ -9,7 +9,7 @@ import pytest
 from openpilot.common.params import Params
 from openpilot.starpilot.flm.canonical_surface_adapter import NAMES
 from openpilot.starpilot.flm.offroad_store import RouteScope
-from openpilot.starpilot.flm.route_tuning_import import enqueue, load_pending, mark_state, same_vehicle, snapshot, vehicle_identity
+from openpilot.starpilot.flm.route_tuning_import import enqueue, load_pending, mark_state, retire_unoffered, same_vehicle, snapshot, vehicle_identity
 
 
 def declared(tmp_path):
@@ -150,3 +150,121 @@ def test_unfinished_job_capacity_never_discards_an_active_intent(tmp_path):
   with pytest.raises(ValueError, match='queue is full'):
     enqueue(params, route_id='declared-route-extra', source_sha256='e' * 64, proposal=proposal)
   assert len(snapshot(params)) == 32
+
+
+def test_changed_route_proof_retires_older_unoffered_direction_instead_of_stacking_it(tmp_path):
+  params, cp, scope, proposal, previous = declared(tmp_path)
+  original = enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal)
+  assert load(params, cp, scope, previous).intent_id == original
+  updated = enqueue(params, route_id='declared-route', source_sha256='e' * 64, proposal=proposal)
+  assert updated != original
+  states = {row['intentId']: row['state'] for row in snapshot(params)}
+  assert states == {original: 'stale_scope', updated: 'waiting_for_vehicle'}
+  assert load(params, cp, scope, previous).intent_id == updated
+  assert mark_state(params, updated, 'native_trial_offered', runtime_event=True)
+  assert mark_state(params, updated, 'confirmed', runtime_event=True)
+  previous['ff_gain_left'] = .01
+  assert load(params, cp, scope, previous) is None
+
+
+def test_source_invalidation_with_no_new_consensus_disables_only_unoffered_intents_for_that_route(tmp_path):
+  params, cp, scope, proposal, previous = declared(tmp_path)
+  offered = enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal)
+  assert load(params, cp, scope, previous).intent_id == offered
+  assert mark_state(params, offered, 'native_trial_offered', runtime_event=True)
+  pending = enqueue(params, route_id='declared-route', source_sha256='e' * 64, proposal=proposal)
+  other = enqueue(params, route_id='another-route', source_sha256='f' * 64, proposal=proposal)
+  assert retire_unoffered(params, route_id='declared-route') == 1
+  states = {row['intentId']: row['state'] for row in snapshot(params)}
+  assert states == {offered: 'native_trial_offered', pending: 'stale_scope', other: 'waiting_for_vehicle'}
+  assert retire_unoffered(params, route_id='declared-route') == 0
+  assert mark_state(params, offered, 'confirmed', runtime_event=True)
+  assert params.get('AutomaticSteeringProfiles') is None and params.get('AutomaticSteeringLiveTrials') is None
+
+
+def test_identical_revalidated_bytes_resume_only_original_binding_and_do_not_duplicate_the_intent(tmp_path):
+  params, cp, scope, proposal, previous = declared(tmp_path)
+  identity = enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal)
+  first = load(params, cp, scope, previous)
+  assert retire_unoffered(params, route_id='declared-route', source_sha256='d' * 64) == 0
+  assert retire_unoffered(params, route_id='declared-route') == 1
+  assert load(params, cp, scope, previous) is None
+  assert enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal) == identity
+  resumed = load(params, cp, scope, previous)
+  assert resumed.intent_id == identity and resumed.previous == first.previous and resumed.scope == first.scope
+  assert enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal) == identity
+  assert len(snapshot(params)) == 1
+  assert retire_unoffered(params, route_id='declared-route') == 1
+  previous['ff_gain_left'] = .01
+  assert enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal) == identity
+  assert load(params, cp, scope, previous) is None
+  assert snapshot(params)[0]['reason'] == 'vehicle_settings_reset_or_accepted_profile_changed'
+  assert enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal) == identity
+  previous['ff_gain_left'] = 0.
+  assert load(params, cp, scope, previous) is None
+
+
+def test_source_revalidation_survives_queue_archival_but_cannot_resurrect_a_native_success(tmp_path):
+  params, cp, scope, proposal, previous = declared(tmp_path)
+  identity = enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal)
+  first = load(params, cp, scope, previous)
+  assert retire_unoffered(params, route_id='declared-route') == 1
+  others = []
+  for number in range(32):
+    others.append(enqueue(params, route_id=f'other-route-{number}', source_sha256=f'{number:064x}', proposal=proposal))
+  assert next(row for row in snapshot(params) if row['intentId'] == identity)['state'] == 'stale_scope'
+  assert mark_state(params, others[-1], 'rejected', reason='declared_unsupported_controller')
+  assert enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal) == identity
+  resumed = load(params, cp, scope, previous)
+  assert resumed.intent_id == identity and resumed.previous == first.previous and resumed.scope == first.scope
+  assert mark_state(params, identity, 'native_trial_offered', runtime_event=True)
+  assert mark_state(params, identity, 'confirmed', runtime_event=True)
+  enqueue(params, route_id='last-route', source_sha256='a' * 64, proposal=proposal)
+  assert enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal) == identity
+  assert next(row for row in snapshot(params) if row['intentId'] == identity)['state'] == 'confirmed'
+
+
+def test_cancelled_source_reconciliation_cannot_change_queue_or_either_accepted_map(tmp_path):
+  params, cp, scope, proposal, previous = declared(tmp_path)
+  identity = enqueue(params, route_id='declared-route', source_sha256='d' * 64, proposal=proposal)
+  assert load(params, cp, scope, previous).intent_id == identity
+  before = snapshot(params)
+  accepted = {key: params.get(key) for key in ('AutomaticSteeringProfiles', 'AutomaticSteeringLiveTrials')}
+  permission = iter((True, False))
+  with pytest.raises(ValueError, match='interrupted'):
+    retire_unoffered(params, route_id='declared-route', authorized=lambda: next(permission))
+  assert snapshot(params) == before
+  assert {key: params.get(key) for key in accepted} == accepted
+
+
+@pytest.mark.parametrize('cloud_sha', ['d' * 64, 'e' * 64])
+def test_own_connect_and_local_aliases_leave_one_unoffered_intent_without_merging_foreign_devices(tmp_path, cloud_sha):
+  params, _, _, proposal, _ = declared(tmp_path)
+  route = '00000001--aaaaaaaaaa'
+  local = enqueue(params, route_id=route, source_sha256='d' * 64, proposal=proposal)
+  cloud = enqueue(params, route_id='a' * 16 + '|' + route, source_sha256=cloud_sha, proposal=proposal)
+  foreign = enqueue(params, route_id='b' * 16 + '|' + route, source_sha256='f' * 64, proposal=proposal)
+  states = {row['intentId']: row['state'] for row in snapshot(params)}
+  assert states == {local: 'stale_scope', cloud: 'waiting_for_vehicle', foreign: 'waiting_for_vehicle'}
+  assert retire_unoffered(params, route_id=route, source_sha256=cloud_sha) == 0
+  assert retire_unoffered(params, route_id=route) == 1
+  assert next(row for row in snapshot(params) if row['intentId'] == foreign)['state'] == 'waiting_for_vehicle'
+
+
+def test_cross_source_retirement_preserves_offered_native_trial_and_unknown_device_is_not_an_alias(tmp_path):
+  params, cp, scope, proposal, previous = declared(tmp_path)
+  route = '00000001--aaaaaaaaaa'
+  offered = enqueue(params, route_id=route, source_sha256='d' * 64, proposal=proposal)
+  assert load(params, cp, scope, previous).intent_id == offered
+  assert mark_state(params, offered, 'native_trial_offered', runtime_event=True)
+  pending = enqueue(params, route_id='a' * 16 + '|' + route, source_sha256='e' * 64, proposal=proposal)
+  assert retire_unoffered(params, route_id=route) == 1
+  assert next(row for row in snapshot(params) if row['intentId'] == offered)['state'] == 'native_trial_offered'
+  assert mark_state(params, offered, 'confirmed', runtime_event=True)
+  assert next(row for row in snapshot(params) if row['intentId'] == pending)['state'] == 'stale_scope'
+  params.put('DongleId', 'unknown', block=True)
+  another = '00000002--bbbbbbbbbb'
+  first = enqueue(params, route_id=another, source_sha256='d' * 64, proposal=proposal)
+  second = enqueue(params, route_id='a' * 16 + '|' + another, source_sha256='e' * 64, proposal=proposal)
+  states = {row['intentId']: row['state'] for row in snapshot(params)}
+  assert states[first] == states[second] == 'waiting_for_vehicle'

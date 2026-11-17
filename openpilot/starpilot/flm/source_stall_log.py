@@ -11,7 +11,7 @@ class SourceStallLog:
     self.emit = emit
     self.started_ns = self.last_ns = None
 
-  def observe(self, collector, *, now_ns, bootstrap_allowed, context_error=None, sm=None):
+  def observe(self, collector, *, now_ns, bootstrap_allowed, context_error=None, sm=None, actor=None):
     try:
       if type(now_ns) is not int or now_ns <= 0:
         return
@@ -49,6 +49,21 @@ class SourceStallLog:
         'receiverCurrent': current_receiver,
         'sourceObservation': None if collector is None else refusal_report(collector),
       }
+      ingress = getattr(actor, 'ingress', None)
+      if ingress is not None:
+        # Small scalar stage diagnostics survive in the rlog after the RAM
+        # overview has been replaced by parked finishing. No replay graph,
+        # private identity, lease renewal or native acceptance is copied.
+        state = ingress.optimizer.offer_state
+        evidence['tracking'] = {
+          'actorReason': str(actor.reason)[:128], 'collectorReason': str(collector.reason)[:128],
+          'responseReason': str(ingress.monitor.reason)[:128], 'responsePoses': len(ingress.monitor.rows),
+          'episodeReason': str(ingress.episodes.reason)[:128], 'optimizerReason': str(ingress.optimizer.reason)[:128],
+          'trialPhase': None if state is None else state.get('phase'),
+          'preparationReason': str(actor.probe_preparation.reason)[:128],
+          'probeReason': str(getattr(actor.probe_process, 'reason', 'unavailable'))[:128],
+          'completedProbeEndpoints': actor.probe_group_samples,
+        }
       if self.emit is None:
         from openpilot.common.swaglog import cloudlog
         cloudlog.event('auto_learn_source_stall', error=True, **evidence)
@@ -64,6 +79,6 @@ def log_source_stall(actor, collector, *, now_ns, bootstrap_allowed, context_err
     logger = getattr(actor, '_source_stall_log', None)
     if logger is None:
       logger = actor._source_stall_log = SourceStallLog()
-    logger.observe(collector, now_ns=now_ns, bootstrap_allowed=bootstrap_allowed, context_error=context_error, sm=sm)
+    logger.observe(collector, now_ns=now_ns, bootstrap_allowed=bootstrap_allowed, context_error=context_error, sm=sm, actor=actor)
   except Exception:
     pass

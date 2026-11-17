@@ -65,13 +65,15 @@ class RouteReviews:
       return False
 
   def _save(self):
-    raw = json.dumps({'version': VERSION, 'records': self.records}, allow_nan=False, separators=(',', ':')).encode()
+    from openpilot.starpilot.galaxy.route_review_progress import owner_context
+    raw = json.dumps({'version': VERSION, 'ownerContext': owner_context(self.root, self.params),
+                      'records': self.records}, allow_nan=False, separators=(',', ':')).encode()
     self.cache._write('reviews.json', raw, maximum=4_000_000)
 
   def scan(self):
     inventory = ({'routes': list(self.stream.local_routes().values()), 'scanIncomplete': False}
                  if self.stream is not None else self.history.snapshot())
-    local = {r['routeId']: r for r in inventory['routes'] if any(s['files'].get('rlog') for s in r['segments'])}
+    local = {r['routeId']: r for r in inventory['routes'] if self.stream is not None or any(s['files'].get('rlog') for s in r['segments'])}
     with self.lock:
       self.local = local
       self.scan_incomplete = inventory['scanIncomplete']
@@ -81,25 +83,15 @@ class RouteReviews:
         self.scan_incomplete = True
       for route_id, route in wanted.items():
         if self.stream is not None:
-          revisions = hashlib.sha256()
-          for segment in route['segments']:
-            folder = self.root / segment['segmentName']
-            for name in ('rlog.zst', 'rlog.bz2', 'rlog.lock', 'qlog.lock'):
-              try:
-                info = (folder / name).lstat()
-                revisions.update(repr((segment['number'], name, info.st_size, info.st_mtime_ns, info.st_ctime_ns)).encode() + b'\n')
-              except FileNotFoundError:
-                pass
-          signature = revisions.hexdigest()
+          from openpilot.starpilot.galaxy.route_review_progress import local_signature
+          signature = local_signature(self.root, route)
         else:
           signature, _ = _route_signature(self.root, route)
-        signature = hashlib.sha256((str(VERSION) + signature).encode()).hexdigest()
+          signature = hashlib.sha256((str(VERSION) + signature).encode()).hexdigest()
         key = 'local:' + route_id
         old = self.records.get(key)
         if old is not None and old.get('signature') == signature:
           continue
-        if self.stream is not None:
-          self.stream.reset(route_id)
         if old is None and len(self.records) >= MAX_RECORDS:
           obsolete = [k for k, r in self.records.items() if r['source'] == 'local' and r['routeId'] not in wanted
                       and k != self.running and (r['status'] in ('ready', 'failed') or
@@ -108,9 +100,14 @@ class RouteReviews:
             self.scan_incomplete = True
             continue
           del self.records[min(obsolete, key=lambda k: self.records[k]['updatedAt'])]
+        if self.stream is not None and self.params is not None:
+          from openpilot.starpilot.flm.route_tuning_import import retire_unoffered
+          retire_unoffered(self.params, route_id=route_id, authorized=self._allowed)
         self.records[key] = {'source': 'local', 'routeId': route_id, 'status': 'queued', 'signature': signature,
                              'purpose': (old or {}).get('purpose', 'tune' if self.stream is not None and self.params is not None else 'review'),
-                             'reason': 'Waiting for parked historical review', 'updatedAt': self.clock(), 'summary': None}
+                             'reason': 'Waiting to resume automatic parked local review', 'updatedAt': self.clock(),
+                             'lastAttemptAt': (old or {}).get('lastAttemptAt', 0),
+                             'lastScheduled': (old or {}).get('lastScheduled', 0), 'summary': (old or {}).get('summary')}
       self.last_scan = time.monotonic()
       self._save()
 
@@ -155,7 +152,7 @@ class RouteReviews:
       key = source + ':' + route_id
       if key == self.running:
         return self.snapshot()
-      if sum(r['status'] == 'queued' and r.get('requested') for r in self.records.values()) >= MAX_QUEUE:
+      if sum(r['status'] == 'queued' and bool(r.get('requested')) for r in self.records.values()) >= MAX_QUEUE:
         raise ValueError('The requested-review queue is full; wait for a review to finish')
       old = self.records.get(key)
       if old is None and len(self.records) >= MAX_RECORDS:
@@ -168,8 +165,15 @@ class RouteReviews:
                  reason='Queued; Connect downloads run only while parked' if source == 'connect' else 'Queued for historical review',
                  updatedAt=self.clock())
       row.setdefault('summary', None)
-      if self.stream is not None:
-        self.stream.reset(route_id)
+      restart = (old is None or old.get('status') == 'ready' or
+                 old.get('status') == 'failed' and str(old.get('reason', '')).startswith('Original route inventory changed;'))
+      if self.stream is not None and restart:
+        if self.params is not None:
+          from openpilot.starpilot.flm.route_tuning_import import retire_unoffered
+          retire_unoffered(self.params, route_id=route_id, authorized=authorized)
+        # The UI may queue a new job while another route owns the importer
+        # lease. Only a finished/changed-inventory rerun needs a later reset.
+        row['restartRequired'] = old is not None
       self.records[key] = row
       self._save()
       self.wake.set()
@@ -179,15 +183,32 @@ class RouteReviews:
   def _full_review(self, row, *, permitted):
     from openpilot.starpilot.flm.route_tuning_consensus import RouteConsensus
     route_id = row['routeId']
+    if row.get('restartRequired'):
+      if not permitted():
+        raise InterruptedError('Full-route restart paused')
+      self.stream.reset(route_id)
+      with self.lock:
+        self.records[row['source'] + ':' + route_id]['restartRequired'] = False
+        self._save()
+    def progress(value):
+      if not permitted():
+        raise InterruptedError('Full-route review paused')
+      with self.lock:
+        key = row['source'] + ':' + route_id
+        self.records[key].update(summary=value, updatedAt=self.clock(),
+          reason=f"Reviewed {value['attemptedSegments']} of {value['availableSegments']} segments; progress saved")
+        self._save()
     result = self.stream.run(route_id, purpose=row.get('purpose', 'review'),
-                             route=None if row['source'] == 'connect' else self.local[route_id])
+                             route=None if row['source'] == 'connect' else self.local[route_id], on_progress=progress)
     if not permitted():
       raise InterruptedError('Full-route review paused')
     if not result['allSegmentsAttempted']:
       return result, 'queued', f"Reviewed {result['attemptedSegments']} of {result['availableSegments']} segments; parked processing will resume"
     if row.get('purpose') != 'tune':
       return result, 'ready', 'All available sections attempted; tracking reviewed'
-    consensus_path = self.stream.store / (hashlib.sha256((route_id + result['sourceSha256']).encode()).hexdigest() + '-comparison.sqlite3')
+    from openpilot.starpilot.flm.full_route_review import ANALYSIS_REVISION
+    comparison_id = hashlib.sha256((str(ANALYSIS_REVISION) + route_id + result['sourceSha256']).encode()).hexdigest()
+    consensus_path = self.stream.store / (comparison_id + '-comparison.sqlite3')
     comparison = RouteConsensus(consensus_path, route_id)
     for segment in self.stream.iter_segments(route_id):
       if not permitted():
@@ -206,7 +227,9 @@ class RouteReviews:
         from openpilot.starpilot.lateral.learning_preferences import read_convergence_mode
         with car.CarParams.from_bytes(payload) as cp:
           convergence = read_convergence_mode(self.params, cp)
-    proof = comparison.summary(convergence=convergence, mode=mode)
+    proof = comparison.summary(convergence=convergence, mode=mode, permitted=permitted)
+    if not permitted():
+      raise InterruptedError('Full-route comparison paused')
     result['tuning'] = proof
     if proof['selected'] is None:
       return result, 'ready', 'Full-route comparison finished; more consistent independent evidence is needed'
@@ -274,10 +297,19 @@ class RouteReviews:
       candidates = [(k, r) for k, r in self.records.items() if r['status'] == 'queued' and (r['source'] == 'connect' or r['routeId'] in self.local)]
       if not candidates:
         return False
-      key, row = min(candidates, key=lambda pair: (not pair[1].get('requested', False), -pair[1]['updatedAt'], pair[0]))
+      # Local drives start automatically; round-robin batches prevent a long
+      # requested Connect job from starving them (or the reverse).
+      def scheduled(record):
+        value = record.get('lastScheduled', 0)
+        return value if type(value) is int and 0 <= value < 2**53 else 0
+      key, row = min(candidates, key=lambda pair: (
+        not (pair[1]['source'] == 'local' and not scheduled(pair[1])),
+        scheduled(pair[1]), not pair[1].get('requested', False), -pair[1]['updatedAt'], pair[0]))
       row = dict(row)
       self.running = key
       self.records[key]['status'] = 'analyzing'
+      self.records[key]['lastAttemptAt'] = self.clock()
+      self.records[key]['lastScheduled'] = min(2**53 - 1, max(map(scheduled, self.records.values()), default=0) + 1)
       self._save()
     deadline = time.monotonic() + 600
     def permitted():

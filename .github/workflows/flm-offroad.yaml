@@ -93,9 +93,14 @@ jobs:
             openpilot/starpilot/flm/tests/test_full_route_review.py \
             openpilot/starpilot/flm/tests/test_route_tuning_consensus.py \
             openpilot/starpilot/flm/tests/test_route_tuning_import.py \
+            openpilot/starpilot/flm/tests/test_route_pooled_tracking.py \
+            openpilot/starpilot/flm/tests/test_live_parked_managed_progress.py \
             openpilot/starpilot/flm/tests/test_import_trial_integration.py \
             openpilot/starpilot/flm/tests/test_import_parked_lifecycle.py \
             openpilot/starpilot/flm/tests/test_faster_native_probe.py \
+            openpilot/starpilot/flm/tests/test_probe_batch_preparation.py \
+            openpilot/starpilot/flm/tests/test_live_tracking_probe_process.py \
+            openpilot/starpilot/flm/tests/test_source_observation_report.py \
             openpilot/starpilot/flm/tests/test_convergence_preferences.py \
             openpilot/starpilot/flm/tests/test_aol_pedal_learning.py \
             openpilot/starpilot/flm/tests/test_aol_live_learning.py \
@@ -106,6 +111,7 @@ jobs:
             openpilot/starpilot/galaxy/tests/test_drive_analysis.py \
             openpilot/starpilot/galaxy/tests/test_drive_stats.py \
             openpilot/starpilot/galaxy/tests/test_stream_route_review.py \
+            openpilot/starpilot/galaxy/tests/test_route_reviews_resume.py \
             openpilot/starpilot/galaxy/tests/test_connect_route_stream.py \
             openpilot/starpilot/galaxy/tests/test_full_route_review_api.py \
             tools/installer/tests/test_static_installer.py \

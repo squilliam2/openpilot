@@ -132,7 +132,8 @@ class StatusReport:
 
     if 'completed_route' in value:
       details['Earlier analysis shown while updating'] = value.get('retained_analysis') is True
-      details['Completed drive analyzed'] = value['completed_route']
+      details['Local route under resumable review' if value.get('managed_route_review') and not value.get('finishing_completed')
+              else 'Completed drive analyzed'] = value['completed_route']
       details['Earlier completed drive reviewed'] = value.get('source_is_latest') is False
       latest_recording = value.get('latest_recording')
       if type(latest_recording) is dict:

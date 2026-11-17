@@ -160,6 +160,17 @@ class LiveParkedFinisher:
   def run_once(self):
     if not self.permitted():
       raise ValueError('Live-drive finishing waits until parked')
+    from openpilot.starpilot.flm.learning_mode import selected_mode
+    from openpilot.starpilot.galaxy.route_review_progress import managed_local_progress
+    managed = managed_local_progress(self.params, self.root) if selected_mode(self.params) == 'live' else None
+    if managed is not None:
+      if not self.permitted() or selected_mode(self.params) != 'live':
+        raise ValueError('Parked route progress was interrupted')
+      if managed['finishing_completed']:
+        # The durable full-route import intent owns the new candidate. An older
+        # legacy fitter suggestion must not survive a no-consensus replacement.
+        self.cache._write('candidate.json', json.dumps({'version': VERSION, 'candidate': None}).encode(), maximum=MAX_BYTES)
+      return managed
     if self.on_analysis is not None:
       self.on_analysis()
     request = {'paramsRoot': str(Path(self.params.get_param_path()).parent), 'namespace': self.params.get_param_path(), 'root': str(self.root)}

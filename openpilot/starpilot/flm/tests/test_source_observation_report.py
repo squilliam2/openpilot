@@ -153,6 +153,31 @@ def test_stall_logging_is_rate_limited_across_collector_replacement_and_sink_fai
   assert attempted[-1]['phase'] == 'bootstrap_deferred'
 
 
+def test_after_bootstrap_stall_keeps_the_actual_response_and_numerical_stage_reasons():
+  from types import SimpleNamespace
+  from openpilot.starpilot.flm.source_stall_log import SourceStallLog, WAIT_NS, INTERVAL_NS
+  with fixture() as (collector, cp, sm):
+    before = (receiver_state(sm), tuple(collector.ready), collector.reason)
+    optimizer = SimpleNamespace(offer_state=None, reason='fresh_physical_residual_window_required')
+    monitor = SimpleNamespace(reason='response_original_source_pair_unqualified', rows=[('original',)])
+    ingress = SimpleNamespace(optimizer=optimizer, monitor=monitor, episodes=SimpleNamespace(reason='source_gap'))
+    actor = SimpleNamespace(ingress=ingress, reason=optimizer.reason,
+      probe_preparation=SimpleNamespace(reason='snapshot_child_deadline'),
+      probe_process=SimpleNamespace(reason='fit_wall_limit'), probe_group_samples=0)
+    emitted = []
+    logger = SourceStallLog(emitted.append)
+    for stamp in (BASE, BASE+WAIT_NS, BASE+WAIT_NS+1, BASE+WAIT_NS+INTERVAL_NS):
+      logger.observe(collector, now_ns=stamp, bootstrap_allowed=True, actor=actor)
+    assert len(emitted) == 2
+    assert emitted[0]['tracking']['responseReason'] == monitor.reason
+    assert emitted[0]['tracking']['responsePoses'] == 1
+    assert emitted[0]['tracking']['preparationReason'] == 'snapshot_child_deadline'
+    assert emitted[0]['tracking']['completedProbeEndpoints'] == 0
+    assert emitted[0]['tracking']['trialPhase'] is None
+    assert (receiver_state(sm), tuple(collector.ready), collector.reason) == before
+    assert monitor.rows == [('original',)] and optimizer.offer_state is None
+
+
 def test_context_failure_log_keeps_old_pose_clock_and_bounds_error():
   from types import SimpleNamespace
   from openpilot.starpilot.flm.source_stall_log import SourceStallLog, WAIT_NS

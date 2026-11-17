@@ -1,11 +1,61 @@
 # Personal Dom fork: FLM and drive history
 
-Updated through [upstream `Dom` e658344ea46d](https://github.com/StarPilotHQ/StarPilot/commit/e658344ea46d423229556ee7109d397b76b9d0d4).
+Updated through [upstream `Dom` e5dde0e0eab0](https://github.com/StarPilotHQ/StarPilot/commit/e5dde0e0eab07c53c000d0e7936ffed3ec8f2592).
 The original investigation used upstream `cfafb8ca72c6`.
 Install branch: [`squilliam2/openpilot:dom`](https://github.com/squilliam2/openpilot/tree/dom).
 Custom software URL: **https://raw.githubusercontent.com/squilliam2/openpilot/dom/installer-dom**.
 The older `installer.comma.ai/squilliam2/dom` endpoint currently fails on the
 tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
+
+## November 16: live collection, route pooling and interruption recovery
+
+- Both newly supplied drives ran the learner in Live mode but recorded no trial
+  or nonzero live correction. The intact rlogs contain healthy physical poses,
+  original controller/native pairs and some continuous clean stretches. Frequent
+  pedal settling/driver exclusions reduce usable coverage; these are not proof
+  that physical steering is already optimal. The old generic status did not
+  retain enough per-stage diagnostics to attribute every refusal conclusively.
+- Optional native replay preparation incorrectly had a two-second completion
+  cutoff inside its existing thirty-second numerical budget. Preparation and
+  computation now share the original thirty-second deadline. Current physical,
+  source, native, publication and consumer acknowledgement leases are unchanged.
+  Bounded stage diagnostics now survive in rlogs after parked status replaces
+  the RAM report. This scheduling defect is not claimed as the sole recorded
+  cause of every missing trial.
+- Full-route comparison previously accepted only already-qualified per-minute
+  proposals. Sparse matching windows were lost before they could accumulate
+  across sections. It now also persists lossless original eligible windows and
+  pools them by recorded setup/cohort. Even original sections select a direction;
+  odd original sections perform one independent comparison. The existing
+  estimator, confidence/refusal rules and bounded correction remain. Every
+  section contributes to coverage; the estimator's fixed, input-selected
+  twenty-four-window arithmetic bound is separate from route length.
+- Automatic local routes start without opening Galaxy. Persisted round-robin
+  scheduling prevents a long requested Connect job from starving them. Progress
+  commits after every completed section. Restarting continues at the next
+  unfinished section; append/repair invalidates only affected source reports.
+  A stable open/empty tail is explicitly omitted after settling, with intact
+  sections retained. Original recordings and closing sentinels are never altered.
+- Importer leases prevent concurrent spool cleanup. Restart reclaims only owned
+  orphan download/inventory temporary files. New UI requests queue while another
+  route runs; an explicitly requested finished rerun resets when scheduled.
+- Source changes retire unoffered old suggestions, including the same own-device
+  route imported locally and through Connect. Revalidation preserves original
+  bindings. Offered trials, accepted maps and later native rollback keep their
+  existing lifecycle; expired live permissions never resume from disk.
+- The parked overview observes the single managed local importer when its exact
+  log-root/Params owner is present, rather than restarting a separate all-or-
+  nothing five-minute fit. The original isolated fitter remains available to
+  standalone callers. A delegated report never claims current application.
+- Latest upstream dashboard archive migration, bookmark and SLC changes are
+  merged alongside partial-tail recovery. Panda artifacts match upstream
+  exactly. An older Volvo integrity test now uses a two-count mismatch because
+  upstream intentionally permits Polestar's documented one-count lag.
+
+Existing reports lacking pooled windows need one fresh analysis after this
+update; subsequent interruptions preserve completed sections. A refused candidate
+is not a certificate that the vehicle is correctly tuned, and a queued numerical
+suggestion still requires fresh live controller qualification and future outcomes.
 
 ## Findings and changes
 

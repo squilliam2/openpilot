@@ -8,8 +8,9 @@ const object = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 const digest = v => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v)
 const vote = v => object(v) && count(v.support) && count(v.total) && v.support <= v.total &&
   finite(v.lowerBound) && v.lowerBound <= 1
+const pooled = v => object(v) && count(v.sections) && count(v.windows) && v.sections <= v.windows
 const direction = v => object(v) && text(v.parameter) && digest(v.configurationHash) && text(v.cohort) &&
-  vote(v.training) && vote(v.heldout)
+  (v.pooledComparison === true ? pooled(v.training) && pooled(v.heldout) : vote(v.training) && vote(v.heldout))
 const applicationStates = ['waiting_for_vehicle', 'queued', 'native_trial_offered', 'confirmed', 'rolled_back', 'rejected', 'stale_scope']
 const tuning = v => object(v) && v.version === 1 && digest(v.sourceSha256) &&
   v.automaticApplicationAllowed === false && v.requiresFreshNativeQualification === true &&
@@ -123,8 +124,14 @@ export const FlmRouteReviews = {
         <p v-if="row.summary.version === 2" class="gx-tuner__caption">{{ row.summary.attemptedSegments }} attempted · {{ row.summary.omittedCount }} unusable · {{ row.summary.allSegmentsAttempted ? 'Every available segment attempted.' : 'Progress saved; processing resumes while parked.' }}</p>
         <p class="gx-tuner__caption">{{ row.summary.wholeRouteReviewed ? 'All available segments reviewed.' : 'Only intact original sections contribute; missing sections remain excluded.' }} {{ row.summary.counts?.routeScopeFrames ? 'Recorded route metadata is present; automatic qualification is separate.' : 'Missing original configuration is never recreated. Legacy tracking can guide a new qualified trial.' }}</p>
         <template v-if="row.summary.tuning">
-          <p v-if="row.summary.tuning.selected">Route comparison supports {{ row.summary.tuning.selected.parameter }} · proposed coordinate change {{ row.summary.tuning.selected.delta }}. Training: {{ row.summary.tuning.selected.training.support }}/{{ row.summary.tuning.selected.training.total }} supporting sections; held-out: {{ row.summary.tuning.selected.heldout.support }}/{{ row.summary.tuning.selected.heldout.total }}.</p>
+          <template v-if="row.summary.tuning.selected">
+            <p>Route comparison supports {{ row.summary.tuning.selected.parameter }} · proposed coordinate change {{ row.summary.tuning.selected.delta }}.</p>
+            <p v-if="row.summary.tuning.selected.pooledComparison">Pooled training: {{ row.summary.tuning.selected.training.windows }} windows across {{ row.summary.tuning.selected.training.sections }} sections; independent held-out: {{ row.summary.tuning.selected.heldout.windows }} windows across {{ row.summary.tuning.selected.heldout.sections }} sections.</p>
+            <p v-else>Training: {{ row.summary.tuning.selected.training.support }}/{{ row.summary.tuning.selected.training.total }} supporting sections; held-out: {{ row.summary.tuning.selected.heldout.support }}/{{ row.summary.tuning.selected.heldout.total }}.</p>
+            <p v-if="row.summary.tuning.selected.pooledComparison && row.summary.tuning.selected.training.fitWindows !== undefined" class="gx-tuner__caption">Numerical fit uses {{ row.summary.tuning.selected.training.fitWindows }} training and {{ row.summary.tuning.selected.heldout.fitWindows }} held-out windows selected across the full source order before fitting.</p>
+          </template>
           <p v-else>No consistent route-wide candidate qualified. Existing automatic learning continues.</p>
+          <p v-if="row.summary.tuning.pooledWindowCount !== undefined" class="gx-tuner__caption">{{ row.summary.tuning.pooledWindowCount }} original windows available for matching across sections. A completed analysis does not establish that the current tuning is optimal.</p>
           <p v-if="row.summary.application" role="status">Import state: {{ row.summary.application.state.replaceAll('_', ' ') }}. {{ row.summary.application.reason.replaceAll('_', ' ') }}</p>
           <p class="gx-tuner__caption">A queued trial is separate from an applied or confirmed tune. The current vehicle, settings and accepted profile must match; driver input still excludes only its affected windows.</p>
         </template>

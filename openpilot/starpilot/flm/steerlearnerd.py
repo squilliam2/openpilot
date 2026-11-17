@@ -914,6 +914,9 @@ def run(
           current_native=current_native, native_key=native_key, hardware_inventory=hardware_inventory,
           allow_bootstrap=live_history.requalifier is None,
           evidence_delay_only=bool(source_valid and study_native_current(now)))
+        if latest is None:
+          from openpilot.starpilot.flm.source_stall_log import log_source_stall
+          log_source_stall(live_actor, collector, now_ns=now, bootstrap_allowed=live_history.requalifier is None, sm=sm)
         if live_history.observe_response_recovery(live_actor):
           # Clear cached trial/restore publication in this SAME parent tick.
           # No old history or accepted target is silently promoted afterward.

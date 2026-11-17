@@ -38,6 +38,11 @@ const fullSummary = { ...summary, version: 2, analysisOnly: false,
     parameter: 'ff_gain_left', delta: .005, requiresFreshNativeQualification: true, acceptedMapWrittenByImport: false },
 }
 const withSummary = value => ({ ...fixture, reviews: [{ ...fixture.reviews[0], summary: value }] })
+const pooledSummary = structuredClone(fullSummary)
+Object.assign(pooledSummary.tuning.selected, { pooledComparison: true, training: { sections: 4, windows: 8 }, heldout: { sections: 3, windows: 5 } })
+assert.equal(validRouteReviews(withSummary(pooledSummary)), true)
+pooledSummary.tuning.selected.heldout.sections = 6
+assert.equal(validRouteReviews(withSummary(pooledSummary)), false)
 assert.equal(validRouteReviews(withSummary(fullSummary)), true, '32 preview entries do not limit the 355 attempted sections')
 assert.equal(validRouteReviews(withSummary({ ...fullSummary, availableSegments: 1001, attemptedSegments: 1001,
   reviewedCount: 1000 })), true, 'The schema has no 50, 355 or 512 route segment cap')

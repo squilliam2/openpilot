@@ -51,7 +51,9 @@ def test_recomputed_crc_cannot_validate_unknown_pscm_counter_domain(identity, ki
   address, data, bus = next(msg for msg in incoming if msg[0] == 0x17)
   changed = bytearray(data)
   if kind == 'unreplicated':
-    changed[1] ^= 0x10
+    # Polestar now permits the documented one-count rack lag. Two counts
+    # remains outside every supported counter relationship.
+    changed[1] ^= 0x20
   elif kind == 'reserved_counter':
     changed[1] = 0xF0
     changed[2] = 0x8F

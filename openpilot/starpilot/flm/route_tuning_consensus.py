@@ -53,6 +53,10 @@ class RouteConsensus:
           PRIMARY KEY(number,config,cohort,parameter));
         CREATE INDEX IF NOT EXISTS vote_group ON votes(config,cohort,parameter);
         CREATE INDEX IF NOT EXISTS source_hash ON sections(sha);
+        CREATE TABLE IF NOT EXISTS tracking_windows(number INTEGER NOT NULL, config TEXT NOT NULL, cohort TEXT NOT NULL,
+          identity TEXT NOT NULL, stamp INTEGER NOT NULL, previous TEXT NOT NULL, body TEXT NOT NULL,
+          PRIMARY KEY(number,identity));
+        CREATE INDEX IF NOT EXISTS window_group ON tracking_windows(config,cohort,number,stamp);
       ''')
       row = db.execute('SELECT version,route FROM identity').fetchall()
       if not row:
@@ -84,7 +88,7 @@ class RouteConsensus:
     vehicle = json.dumps(result.get('vehicleIdentity'), sort_keys=True, separators=(',', ':'), allow_nan=False)
     if len(vehicle) > 4096:
       raise ValueError('Bounded original vehicle identity required')
-    prepared = []
+    prepared, original_windows = [], []
     seen = set()
     for group in groups:
       config, cohort, windows = group.get('configurationHash'), group.get('cohort'), group.get('windows')
@@ -109,6 +113,22 @@ class RouteConsensus:
         delta = min(map(abs, deltas)) * direction
         votes.append((name, direction, delta))
       prepared.append((config, cohort, windows, votes))
+      if 'trackingWindows' in group:
+        from openpilot.starpilot.flm.canonical_surface_adapter import NAMES, coordinate_bounds
+        from openpilot.starpilot.flm.route_window_transport import unpack_window
+        from openpilot.starpilot.flm.offroad_evidence import cohort as window_cohort
+        previous = group.get('previousCoordinates')
+        if (type(group['trackingWindows']) is not list or len(group['trackingWindows']) != windows or
+            len(original_windows) + windows > 128 or type(previous) is not dict or set(previous) != set(NAMES) or
+            any(type(v) not in (int, float) or not math.isfinite(v) or not coordinate_bounds(n)[0] <= v <= coordinate_bounds(n)[1]
+                for n, v in previous.items())):
+          raise ValueError('Exact bounded original windows and prior coordinates required')
+        for value in group['trackingWindows']:
+          window = unpack_window(value)
+          if window.points[0].route != self.identity or window.points[0].segment != number or window_cohort(window) != cohort:
+            raise ValueError('Original window route, section or cohort changed')
+          original_windows.append((number, config, cohort, window.identity, window.points[0].mono_ns,
+                                  json.dumps(previous, sort_keys=True), json.dumps(value, separators=(',', ':'), allow_nan=False)))
     with self._connect() as db:
       old = db.execute('SELECT sha FROM sections WHERE number=?', (number,)).fetchone()
       if old:
@@ -118,13 +138,14 @@ class RouteConsensus:
       duplicate = bool(db.execute('SELECT 1 FROM sections WHERE sha=? LIMIT 1', (sha,)).fetchone())
       db.execute('INSERT INTO sections VALUES (?,?,?,?)', (number, sha, int(duplicate), vehicle))
       if not duplicate:
+        db.executemany('INSERT INTO tracking_windows VALUES(?,?,?,?,?,?,?)', original_windows)
         for config, cohort, windows, votes in prepared:
           db.execute('INSERT INTO groups VALUES (?,?,?,?)', (number, config, cohort, windows))
           db.executemany('INSERT INTO votes VALUES (?,?,?,?,?,?)', ((number, config, cohort, name, direction, delta)
                                                                   for name, direction, delta in votes))
     return not duplicate
 
-  def summary(self, *, convergence='standard', mode='live'):
+  def summary(self, *, convergence='standard', mode='live', permitted=lambda: True):
     if convergence not in ('standard', 'faster') or mode not in ('live', 'parked'):
       raise ValueError('Known convergence policy and learning mode required')
     from openpilot.starpilot.flm.canonical_surface_adapter import NAMES
@@ -155,7 +176,7 @@ class RouteConsensus:
                 'selected': None, 'reason': 'more_independent_consistent_segment_evidence_required',
                 'automaticApplicationAllowed': False, 'requiresFreshNativeQualification': True}
       if chosen is None:
-        return report
+        return self._pooled_summary(db, report, allowed, convergence, permitted)
       support, lower, config, cohort, name, direction, total = chosen
       heldout_total = db.execute('SELECT count(*) FROM groups WHERE config=? AND cohort=? AND number%2=1', (config, cohort)).fetchone()[0]
       heldout_support = db.execute('SELECT count(*) FROM votes WHERE config=? AND cohort=? AND parameter=? AND direction=? AND number%2=1',
@@ -177,3 +198,100 @@ class RouteConsensus:
                             'nativeQualified': False, 'requiresFreshNativeQualification': True}
       report['reason'] = 'route_consensus_waiting_for_current_native_trial'
       return report
+
+  @staticmethod
+  def _pooled_windows(db, config, cohort, partition):
+    from openpilot.starpilot.flm.route_window_transport import unpack_window
+    query = 'FROM tracking_windows WHERE config=? AND cohort=? AND number%2=?'
+    args = (config, cohort, partition)
+    count, sections = db.execute('SELECT count(*),count(DISTINCT number) ' + query, args).fetchone()
+    # The upstream numerical estimator accepts at most24 windows. Selection
+    # spans the ENTIRE source order before looking at any fit/error outcome.
+    indices = list(range(count)) if count <= 24 else [i * (count-1)//23 for i in range(24)]
+    selected, previous = [], None
+    for index in indices:
+      body, prior = db.execute('SELECT body,previous ' + query + ' ORDER BY number,stamp,identity LIMIT 1 OFFSET ?', (*args, index)).fetchone()
+      if previous is not None and prior != previous:
+        raise ValueError('Original pooled baseline changed within one configuration')
+      previous = prior
+      selected.append(unpack_window(json.loads(body)))
+    return tuple(selected), json.loads(previous) if previous is not None else None, count, sections
+
+  @staticmethod
+  def _directions(estimated, windows, previous, cohort, allowed):
+    from openpilot.starpilot.flm.offroad_tracking import suggest
+    from openpilot.starpilot.flm.offroad_coordinate_policy import tracking_coordinate_candidates
+    _, side, phase = cohort.split(':')
+    proposals = [suggest(estimated, previous, side=side, phase=phase),
+                 *tracking_coordinate_candidates(estimated, windows, previous, side=side, phase=phase)]
+    return {p['parameter'].removeprefix('stable:'): p for p in proposals if p is not None and
+            p['parameter'].removeprefix('stable:') in allowed and 0 < abs(p['delta']) <= .25}
+
+  def _pooled_summary(self, db, report, allowed, convergence, permitted):
+    from openpilot.starpilot.flm.offroad_tracking import estimate
+    def fit(windows, cohort):
+      try:
+        return estimate(windows, cohort=cohort, permitted=permitted)
+      except ValueError:
+        if not permitted():
+          raise InterruptedError('Pooled route comparison paused') from None
+        raise
+    reasons, diagnostics, chosen, chosen_rank = {}, [], None, None
+    count = db.execute('SELECT count(*) FROM tracking_windows').fetchone()[0]
+    report['pooledWindowCount'] = count
+    if not count:
+      return report  # Older immutable reports retain the existing vote path.
+    # All ranking uses EVEN source sections only. A single winning direction
+    # receives ONE independent odd-section comparison, with no fallback search.
+    for config, cohort in db.execute('SELECT DISTINCT config,cohort FROM tracking_windows WHERE number%2=0 ORDER BY config,cohort'):
+      if not permitted():
+        raise InterruptedError('Pooled route comparison paused')
+      windows, previous, total, sections = self._pooled_windows(db, config, cohort, 0)
+      reason = 'not_enough_independent_training_sections'
+      if sections >= 3 and len(windows) >= 3 and len({w.points[0].segment for w in windows}) >= 3:
+        fitted = fit(windows, cohort)
+        reason = 'reference_response_not_identified' if fitted is None else 'no_identified_adjustment_in_training_windows'
+        choices = {} if fitted is None else self._directions(fitted, windows, previous, cohort, allowed)
+        if fitted is not None and len(diagnostics) < 32:
+          diagnostics.append({'configurationHash': config, 'cohort': cohort, 'sections': sections, 'windows': total,
+                              'gainInterval': fitted.gain_interval, 'lagIntervalMs': [v/1e6 for v in fitted.lag_interval_ns],
+                              'residualRms': fitted.residual_rms, 'referenceRms': fitted.reference_rms,
+                              'errorReversalHz': fitted.error_reversal_hz, 'identifiedParameters': sorted(choices)})
+        for name, proposal in sorted(choices.items()):
+          rank = (-sections, -total, config, cohort, name)
+          if chosen_rank is None or rank < chosen_rank:
+            chosen, chosen_rank = (config, cohort, name, proposal, total, sections,
+                                   len(windows), len({w.points[0].segment for w in windows})), rank
+        if choices:
+          reason = 'training_direction_identified'
+      reasons[reason] = reasons.get(reason, 0) + 1
+    report['pooledTrainingReasons'] = reasons
+    report['pooledTrainingDiagnostics'] = diagnostics
+    if chosen is None:
+      report['reason'] = 'pooled_training_windows_do_not_identify_a_supported_adjustment'
+      return report
+    config, cohort, name, proposal, total, sections, fit_windows, fit_sections = chosen
+    windows, previous, held_total, held_sections = self._pooled_windows(db, config, cohort, 1)
+    comparison = {'parameter': name, 'configurationHash': config, 'cohort': cohort, 'pooledComparison': True,
+                  'training': {'sections': sections, 'windows': total, 'fitWindows': fit_windows, 'fitSections': fit_sections},
+                  'heldout': {'sections': held_sections, 'windows': held_total, 'fitWindows': len(windows),
+                              'fitSections': len({w.points[0].segment for w in windows})}}
+    report['comparison'] = comparison
+    report['reason'] = 'pooled_heldout_sections_do_not_support_training_selected_direction'
+    if held_sections < 3 or len(windows) < 3 or len({w.points[0].segment for w in windows}) < 3:
+      return report
+    if not permitted():
+      raise InterruptedError('Pooled route comparison paused')
+    fitted = fit(windows, cohort)
+    replication = {} if fitted is None else self._directions(fitted, windows, previous, cohort, allowed)
+    other = replication.get(name)
+    if other is None or proposal['delta'] * other['delta'] <= 0 or abs(proposal['delta']) > abs(other['delta']) + 1e-12:
+      return report
+    identities = db.execute('''SELECT DISTINCT s.vehicle FROM sections s JOIN tracking_windows w ON s.number=w.number
+                               WHERE w.config=? AND w.cohort=? LIMIT 2''', (config, cohort)).fetchall()
+    report['selected'] = {**comparison, 'delta': math.copysign(min(.005, abs(proposal['delta'])), proposal['delta']),
+                          'sourceVehicle': json.loads(identities[0][0]) if len(identities) == 1 else None,
+                          'convergence': convergence, 'fasterEvidenceSupported': False,
+                          'nativeQualified': False, 'requiresFreshNativeQualification': True}
+    report['reason'] = 'route_consensus_waiting_for_current_native_trial'
+    return report

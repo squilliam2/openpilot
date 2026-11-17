@@ -24,6 +24,7 @@ MAX_BYTES = 256 * 1024
 MAX_PENDING = 32  # Job retention, not a route's segment count.
 STATES = frozenset(('waiting_for_vehicle', 'queued', 'native_trial_offered', 'confirmed', 'rolled_back', 'rejected', 'stale_scope'))
 TERMINAL = frozenset(('confirmed', 'rolled_back', 'rejected', 'stale_scope'))
+ORIGINAL_ROUTE = re.compile(r'(?:[0-9a-f]{8}--[0-9a-f]{10}|[0-9]{4}-[0-9]{2}-[0-9]{2}--[0-9]{2}-[0-9]{2}-[0-9]{2})\Z')
 
 
 def _hash(value):
@@ -82,6 +83,7 @@ def _read(cache):
   rows = value['intents']
   for identity, row in rows.items():
     if (not _hash(identity) or type(row) is not dict or row.get('state') not in STATES or
+        type(row.get('route_id')) is not str or not 1 <= len(row['route_id']) <= 180 or
         not _hash(row.get('source_sha256')) or row.get('name') not in ROUTE_NAMES or
         type(row.get('delta')) not in (int, float) or not math.isfinite(row['delta']) or not 0 < abs(row['delta']) <= .005):
       raise ValueError('Valid source-bound route import required')
@@ -90,6 +92,62 @@ def _read(cache):
 
 def _save(cache, rows):
   cache._write('pending.json', _canonical({'version': VERSION, 'intents': rows}), maximum=MAX_BYTES)
+
+
+def _own_device(params):
+  try:
+    raw, okay = read_saved(params, 'DongleId', 64)
+    device = raw.decode('ascii') if okay and raw is not None else None
+    return device if type(device) is str and re.fullmatch('[0-9a-f]{16}', device) else None
+  except (OSError, AttributeError, TypeError, UnicodeError):
+    return None
+
+
+def _physical_route(route_id, device):
+  if device is not None and route_id.startswith(device + '|'):
+    original = route_id[len(device) + 1:]
+    if ORIGINAL_ROUTE.fullmatch(original):
+      return original
+  return route_id
+
+
+def _retire_unoffered(rows, route_id, source_sha256=None, *, device=None, keep_intent_id=None):
+  changed = 0
+  physical = _physical_route(route_id, device)
+  for identity, row in rows.items():
+    if (_physical_route(row['route_id'], device) == physical and row['state'] in ('waiting_for_vehicle', 'queued') and
+        (source_sha256 is None or row['source_sha256'] != source_sha256 or
+         keep_intent_id is not None and identity != keep_intent_id)):
+      row.update(source_previous_state=row['state'], source_invalidated=True, state='stale_scope',
+                 reason='original_route_source_changed_revalidation_required', updated_at=datetime.now(UTC).timestamp())
+      changed += 1
+  return changed
+
+
+def retire_unoffered(params, *, route_id, source_sha256=None, authorized=lambda: True):
+  """Suspend only unoffered intents while an original route is revalidated.
+
+  Passing a current proof digest preserves intents for that exact proof. An
+  offered trial belongs to the native lifecycle and is never cancelled here.
+  """
+  if type(route_id) is not str or not 1 <= len(route_id) <= 180 or source_sha256 is not None and not _hash(source_sha256):
+    raise ValueError('Original route identity and optional source digest required')
+  if not authorized():
+    raise ValueError('Route import reconciliation was interrupted')
+  cache = _cache(params)
+  with _locked(cache):
+    rows = _read(cache)
+    changed = _retire_unoffered(rows, route_id, source_sha256, device=_own_device(params))
+    if changed:
+      if not authorized():
+        raise ValueError('Route import reconciliation was interrupted')
+      _save(cache, rows)
+  return changed
+
+
+def _source_revalidated(row):
+  return (row.get('state') == 'stale_scope' and row.get('source_invalidated') is True and
+          row.get('source_previous_state') in ('waiting_for_vehicle', 'queued'))
 
 
 @contextmanager
@@ -135,27 +193,52 @@ def enqueue(params, *, route_id, source_sha256, proposal, observed_vehicle=None,
   cache = _cache(params)
   with _locked(cache):
     rows = _read(cache)
-    if intent_id not in rows:
+    changed = bool(_retire_unoffered(rows, route_id, source_sha256, device=_own_device(params), keep_intent_id=intent_id))
+    saved = rows.get(intent_id)
+    archived = False
+    if saved is None:
       completed = []
       with _archive(cache) as db:
-        if db.execute('SELECT 1 FROM completed WHERE identity=?', (intent_id,)).fetchone():
-          return intent_id
+        old = db.execute('SELECT body FROM completed WHERE identity=?', (intent_id,)).fetchone()
+        if old is not None:
+          saved = json.loads(old[0])
+          archived = _source_revalidated(saved)
         if len(rows) >= MAX_PENDING:
           completed = [identity for identity, saved in rows.items() if saved['state'] in TERMINAL]
           for identity in completed:
-            saved = rows[identity]
-            db.execute('INSERT OR IGNORE INTO completed VALUES(?,?,?)',
-                       (identity, saved['updated_at'], _canonical(saved).decode()))
+            terminal = rows[identity]
+            db.execute('INSERT OR REPLACE INTO completed VALUES(?,?,?)',
+                       (identity, terminal['updated_at'], _canonical(terminal).decode()))
           # Commit archive IDs before removing JSON rows. An interruption may
           # leave a duplicate terminal row, but can never erase its dedup ID.
       for identity in completed:
         del rows[identity]
-      if len(rows) >= MAX_PENDING:
+      changed |= bool(completed)
+      if (saved is None or archived) and len(rows) >= MAX_PENDING:
         raise ValueError('Route import job queue is full; no saved intent was discarded')
+    if saved is None:
+      rows[intent_id] = row
+      changed = True
+    elif _source_revalidated(saved):
+      # Only the exact original proof can resume this unoffered intent. Keep
+      # its old binding/profile so a settings/profile change still rejects it;
+      # this is not rebasing old route evidence onto another accepted map.
+      saved.update(state=saved.pop('source_previous_state'), source_invalidated=False,
+                   reason='waiting_for_fresh_current_native_trial' if saved['binding'] is not None else
+                          'current_vehicle_and_native_qualification_required',
+                   updated_at=datetime.now(UTC).timestamp())
+      rows[intent_id] = saved
+      changed = True
+    if changed:
       if not authorized():
         raise ValueError('Route import was interrupted')
-      rows[intent_id] = row
       _save(cache, rows)
+    if archived:
+      # JSON first: a power loss can retain an older archive copy, never erase
+      # the only durable intent. Active rows take precedence; later archival
+      # replaces that old copy with the actual terminal/native outcome.
+      with _archive(cache) as db:
+        db.execute('DELETE FROM completed WHERE identity=?', (intent_id,))
   return intent_id
 
 

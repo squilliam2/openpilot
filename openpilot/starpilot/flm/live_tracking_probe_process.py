@@ -8,6 +8,7 @@ from openpilot.starpilot.flm.live_trial_contract import SOURCE_EXPERIMENT_STEP
 
 VERSION = 'live-probe-numerical-job-v1'
 MAX_PACKED = 3 * 1024 * 1024
+NUMERICAL_DEADLINE_NS = 30_000_000_000
 
 
 def _digest(payload):
@@ -493,7 +494,7 @@ def _prepared_wire(job, context, expected):
 
 class ProbeProcess(FitProcess):
   worker_module = 'openpilot.starpilot.flm.live_tracking_probe_worker'
-  wall_ns = 30_000_000_000
+  wall_ns = NUMERICAL_DEADLINE_NS
   interval_ns = 0
 
   def __init__(self, *, archived_diagnostic=False):
@@ -554,7 +555,7 @@ class ProbeProcess(FitProcess):
     ):
       raise ValueError('prepared numerical wire or original context differs')
     rows = expected['batch']
-    if not 1 <= len(rows) <= 4 or any(not 0 < row['queued_ns'] <= now_ns <= row['queued_ns'] + 2_000_000_000 for row in rows):
+    if not 1 <= len(rows) <= 4 or any(not 0 < row['queued_ns'] <= now_ns <= row['queued_ns'] + NUMERICAL_DEADLINE_NS for row in rows):
       return False
     from copy import deepcopy
 
@@ -562,6 +563,9 @@ class ProbeProcess(FitProcess):
     digest = prepared['job_sha256']
     if not super().submit_bytes(wire, token=(_primitive(token), self.archived_diagnostic, digest), now_ns=now_ns):
       return False
+    # Preparation and computation share ONE original numerical deadline.
+    # This is historical arithmetic, never a refreshed current/native lease.
+    self.started_ns = min(row['queued_ns'] for row in rows)
     self.expected = digest, owned_context
     self.prepared_context_sha = prepared['context_sha256']
     return True
