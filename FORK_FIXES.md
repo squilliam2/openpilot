@@ -1,6 +1,6 @@
 # Personal Dom fork: FLM and drive history
 
-Updated through [upstream `Dom` e5dde0e0eab0](https://github.com/StarPilotHQ/StarPilot/commit/e5dde0e0eab07c53c000d0e7936ffed3ec8f2592).
+Updated through [upstream `Dom` 8bfad8474855](https://github.com/StarPilotHQ/StarPilot/commit/8bfad84748555732644b266d31f14398b9d9f7c6).
 The original investigation used upstream `cfafb8ca72c6`.
 Install branch: [`squilliam2/openpilot:dom`](https://github.com/squilliam2/openpilot/tree/dom).
 Custom software URL: **https://raw.githubusercontent.com/squilliam2/openpilot/dom/installer-dom**.
@@ -51,11 +51,36 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
   merged alongside partial-tail recovery. Panda artifacts match upstream
   exactly. An older Volvo integrity test now uses a two-count mismatch because
   upstream intentionally permits Polestar's documented one-count lag.
+- Upstream's subsequent selected-controller recording regression fix and
+  cross-frame publisher tests are included. The installed personal fork already
+  had the 192-byte writer bound, so this upstream change is not attributed as
+  the cause of its recorded missing trials. Latest Hyundai warning forwarding,
+  turn-hold, GM pedal and Honda radar fixes and matching Panda artifacts are
+  also retained unchanged.
 
 Existing reports lacking pooled windows need one fresh analysis after this
 update; subsequent interruptions preserve completed sections. A refused candidate
 is not a certificate that the vehicle is correctly tuned, and a queued numerical
 suggestion still requires fresh live controller qualification and future outcomes.
+
+Validation for this revision: 1,499 affected FLM/Galaxy tests and 305 subtests,
+followed by 141 final focused checks and 36 subtests; 1,462 earlier upstream
+checks and 748 subtests; 2,612 checks and 42 subtests for the last upstream merge.
+Ruff, pinned ty 0.0.80, all 103 Galaxy JavaScript test modules and actual local
+Chrome component checks at 416/1280 pixels pass. The browser checks cover both
+the existing directional-vote result and pooled-window result. Native safety
+checks build from the merged source in an isolated x86 QA tree; fork/device ARM
+artifacts are not replaced by those test builds.
+
+All 32 intact rlogs from the two newly supplied drives were replayed privately
+through the new pooled path; both incomplete final frames remained excluded.
+The drives retained 26 and 28 poolable windows respectively, with further
+separation by recorded setup and maneuver. Neither produced a qualified change:
+the first lacked three comparable training sections per group; the second's
+one qualifying training group had a gain interval of approximately 0.51–1.31,
+spanning both adjustment directions. These observations do not prove a physical
+steering cause, that the tune is optimal, or that a changed value would help.
+No accepted profile was changed during the replay; driving validation remains.
 
 ## Findings and changes
 
