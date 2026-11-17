@@ -47,6 +47,9 @@ tested AGNOS 20.5.2 comma four before cloning; use the replacement above.
   log-root/Params owner is present, rather than restarting a separate all-or-
   nothing five-minute fit. The original isolated fitter remains available to
   standalone callers. A delegated report never claims current application.
+  If Galaxy starts after the fallback fitter, it is adopted during that same
+  run and the obsolete child is reaped. A bounded handoff refusal is exported
+  if the matching managed owner/current vehicle is unavailable.
 - Latest upstream dashboard archive migration, bookmark and SLC changes are
   merged alongside partial-tail recovery. Panda artifacts match upstream
   exactly. An older Volvo integrity test now uses a two-count mismatch because

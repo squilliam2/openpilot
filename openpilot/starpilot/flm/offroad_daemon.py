@@ -113,6 +113,8 @@ class StatusReport:
       details['Live-drive fit finished while parked'] = value.get('finishing_completed') is True
       details['Parked result needs fresh live qualification'] = True
       details['Next-drive candidate'] = value.get('next_drive_candidate')
+      if value.get('managed_handoff_refusal') is not None:
+        details['Resumable review handoff'] = value['managed_handoff_refusal']
     if value.get('skipped_routes'):
       details['Skipped recorded drives'] = [list(row) for row in value['skipped_routes'][:16]]
     if value.get('partial_drive') is True:
@@ -392,9 +394,10 @@ def _run():
           break  # Changing modes must drop the previous fitter's image too.
         if worker is None and mode == 'live':
           from openpilot.starpilot.flm.live_parked_finish import LiveParkedFinisher
-          worker = LiveParkedFinisher(params, Paths.log_root(), cache, permitted=permitted,
-            on_analysis=lambda: report.analyzing({'status': 'fitting', 'reason': 'finishing_live_drive_while_parked',
-                                                 'learning_mode': 'live', 'finishing': True}))
+          worker = LiveParkedFinisher(params, Paths.log_root(), cache, permitted=permitted)
+          worker.on_analysis = lambda finisher=worker: report.analyzing(
+            {'status': 'fitting', 'reason': 'finishing_live_drive_while_parked', 'learning_mode': 'live', 'finishing': True,
+             'managed_handoff_refusal': finisher.last_managed_refusal})
           worker_mode = mode
         if worker is None:
           from openpilot.starpilot.flm.offroad_worker import OffroadWorker

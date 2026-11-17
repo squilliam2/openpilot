@@ -30,7 +30,7 @@ def local_signature(root, route):
   return hashlib.sha256((repr((VERSION, ANALYSIS_REVISION)) + revisions.hexdigest()).encode()).hexdigest()
 
 
-def managed_local_progress(params, root, *, store=None):
+def managed_local_progress(params, root, *, store=None, diagnostics=None):
   """Inert display data only; native qualification remains with the live owner.
 
   Only the exact log root/Params owner can replace the legacy latest-route fit.
@@ -41,23 +41,30 @@ def managed_local_progress(params, root, *, store=None):
     from openpilot.starpilot.storage import starpilot_storage_root
     store = starpilot_storage_root() / 'galaxy' / 'route-reviews'
   store = Path(store)
+  diagnostic = diagnostics if diagnostics is not None else {}
+  diagnostic['stage'] = 'managed_cache_not_present'
   if not store.is_dir():
     return None
   try:
+    diagnostic['stage'] = 'managed_cache_unreadable'
     value = json.loads(AssessmentCache(store)._read('reviews.json', 4_000_000))
     records = value['records']
+    diagnostic['stage'] = 'managed_owner_or_version_different'
     if (value.get('version') != VERSION or value.get('ownerContext') != owner_context(root, params) or
         type(records) is not dict or len(records) > 100):
       return None
     from opendbc.car.structs import car
     from openpilot.starpilot.flm.offroad_runtime import current_scope
     from openpilot.starpilot.schema_cache import inspect_cache
+    diagnostic['stage'] = 'saved_current_vehicle_unavailable'
     saved, readable = read_saved(params, 'CarParamsPersistent', 1024 * 1024)
     payload = inspect_cache('CarParamsPersistent', saved).payload if readable and saved else None
     if payload is None:
       return None
+    diagnostic['stage'] = 'current_registered_scope_unavailable'
     with car.CarParams.from_bytes(payload) as cp:
-      current_scope(cp, params)  # Explicit OFF/manual/unsupported settings retain the normal refusal path.
+      current_scope(cp.as_builder(), params)  # Match the isolated fitter's registered constructor contract.
+    diagnostic['stage'] = 'logger_identity_unavailable'
     raw, okay = read_saved(params, 'CurrentRoute', 180)
     counter, count_ok = read_saved(params, 'RouteCount', 32)
     if not okay or not count_ok:
@@ -95,6 +102,7 @@ def managed_local_progress(params, root, *, store=None):
     summary = row.get('summary') or {}
     if type(summary) is not dict:
       return None
+    diagnostic['stage'] = 'managed_progress_invalid'
     available, attempted = summary.get('availableSegments', 0), summary.get('attemptedSegments', 0)
     if type(available) is not int or type(attempted) is not int or not 0 <= attempted <= available:
       return None
@@ -122,6 +130,7 @@ def managed_local_progress(params, root, *, store=None):
       source = summary.get('sourceSha256')
       if type(source) is str and len(source) == 64 and not source.strip('0123456789abcdef'):
         result['source_sha256'] = source
+    diagnostic['stage'] = 'managed_progress_available'
     return result
   except (OSError, ValueError, TypeError, KeyError, AttributeError, UnicodeError):
     return None

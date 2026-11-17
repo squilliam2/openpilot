@@ -157,12 +157,12 @@ class LiveParkedFinisher:
       '../galaxy/drive_analysis.py', '../galaxy/drive_history.py',
     ))).hexdigest()
 
-  def run_once(self):
-    if not self.permitted():
-      raise ValueError('Live-drive finishing waits until parked')
+  def _managed_progress(self):
     from openpilot.starpilot.flm.learning_mode import selected_mode
     from openpilot.starpilot.galaxy.route_review_progress import managed_local_progress
-    managed = managed_local_progress(self.params, self.root) if selected_mode(self.params) == 'live' else None
+    diagnostic = {}
+    managed = managed_local_progress(self.params, self.root, diagnostics=diagnostic) if selected_mode(self.params) == 'live' else None
+    self.last_managed_refusal = diagnostic.get('stage', 'live_mode_not_selected') if managed is None else None
     if managed is not None:
       if not self.permitted() or selected_mode(self.params) != 'live':
         raise ValueError('Parked route progress was interrupted')
@@ -170,6 +170,14 @@ class LiveParkedFinisher:
         # The durable full-route import intent owns the new candidate. An older
         # legacy fitter suggestion must not survive a no-consensus replacement.
         self.cache._write('candidate.json', json.dumps({'version': VERSION, 'candidate': None}).encode(), maximum=MAX_BYTES)
+      return managed
+    return None
+
+  def run_once(self):
+    if not self.permitted():
+      raise ValueError('Live-drive finishing waits until parked')
+    managed = self._managed_progress()
+    if managed is not None:
       return managed
     if self.on_analysis is not None:
       self.on_analysis()
@@ -183,10 +191,19 @@ class LiveParkedFinisher:
           raise ValueError('Parked fitter input pipe is unavailable')
         child.stdin.write(json.dumps(request).encode())
         child.stdin.close()
-        deadline = time.monotonic() + 330
+        started = time.monotonic()
+        deadline, next_managed_check = started + 330, started + 1
         while child.poll() is None:
-          if not self.permitted() or time.monotonic() >= deadline:
+          now = time.monotonic()
+          if not self.permitted() or now >= deadline:
             raise ValueError('Parked finishing paused or reached its processing deadline')
+          if now >= next_managed_check:
+            next_managed_check = now + 2
+            managed = self._managed_progress()
+            if managed is not None:
+              # Galaxy can finish its startup after this fallback child starts.
+              # Reap obsolete duplicate work as soon as its single owner exists.
+              return managed
           time.sleep(.1)
         if not self.permitted():
           raise ValueError('Parked finishing was interrupted')
